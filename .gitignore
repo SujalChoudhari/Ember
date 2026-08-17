@@ -8,3 +8,4 @@ var/
 /bin/
 *.test
 coverage.out
+__pycache__/
