@@ -73,7 +73,6 @@ CREATE TABLE IF NOT EXISTS locks (
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY(resource_id, kind)
 );
-
 CREATE TABLE IF NOT EXISTS blob_objects (
   bucket_id text NOT NULL REFERENCES resources(id),
   object_key text NOT NULL,
