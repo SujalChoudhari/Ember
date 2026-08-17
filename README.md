@@ -1,27 +1,34 @@
-# Ember Phase 1 — private local vertical slice
+# Ember Phase 1
 
-This repository is private/local by design. It has no configured remote.
+Ember is a **private, local-first, Azure-shaped learning platform**. Phase 1 is a deliberately small Go modular monolith that explores a Resource Manager boundary and an Ember-owned Blob boundary backed by local PostgreSQL and a private filesystem provider.
 
-The implemented slice is a Go modular-monolith boundary for:
+This is not Azure REST compatibility, an Azure emulator, or a claim of support for later Ember services. The HTTP contract uses Azure-shaped resource paths and concepts where they clarify the learning surface, while Ember owns the semantics and limits.
 
-- Resource Manager group and Blob bucket lifecycle;
-- synchronous exact-byte object PUT/GET/HEAD/DELETE with staged filesystem writes;
-- opaque provider-generated object paths, checksum/ETag/version metadata, quota/key limits;
-- operations and 24-hour idempotency replay/conflict handling;
-- seeded owner/editor/reader bearer-token RBAC;
-- locks, dependency-ordered deletion, redacted append-only audit;
-- repair findings and explicit operator-assisted quarantine/delete boundary;
-- versioned `/api/v1` HTTP API and an HTTP-only `cmd/ember` CLI.
+## Phase 1 boundary
+
+The verified slice includes:
+
+- Resource Manager group lifecycle and `Ember.Blob/bucket` lifecycle;
+- synchronous exact-byte Blob object `PUT`, `GET`, `HEAD`, and `DELETE`;
+- a 10 MiB synchronous object limit, 1 GiB logical quota, key validation, SHA-256 checksums, ETags, and provider-generated opaque paths;
+- staged filesystem writes with fsync/rename, root confinement, integrity checks, and operator-assisted quarantine findings;
+- PostgreSQL-backed resources, operations, idempotency records with 24-hour replay/conflict handling, locks, append-only redacted audit events, and schema compatibility checks;
+- seeded owner/editor/reader bearer-token RBAC for local verification;
+- versioned `/api/v1` HTTP endpoints and the HTTP-only `cmd/ember` CLI.
+
+The approved persistence boundary is PostgreSQL for control-plane authority plus a private filesystem directory for Blob bytes. The in-memory `internal/ember` store remains an explicit deterministic adapter for contract tests and `--dev-memory-control-plane`; it is not the production authority.
+
+See [the Phase 1 design diagrams](docs/ember-phase1-design.md) and [the verification record](docs/verification-2026-08-17.md) for the implementation boundary and evidence.
 
 ## Prerequisites
 
-The PostgreSQL-backed verification path requires Go 1.22.2 and PostgreSQL 16.14, including `psql`, `pg_dump`, `createdb`, `dropdb`, and `pg_restore`. The current private verification host has these tools installed. Docker is optional for the Compose profile; it is not installed on the current host, so Docker/Compose verification is not claimed.
+The verified local path requires:
 
-## Important runtime boundary
+- Go **1.22.2**;
+- PostgreSQL **16.14**;
+- PostgreSQL client/backup tools: `psql`, `createdb`, `dropdb`, `pg_dump`, and `pg_restore`.
 
-`internal/ember` contains a deterministic in-memory control-plane adapter for the local contract tests. It is not a replacement for the approved PostgreSQL authority. The repository also includes PostgreSQL 16 migrations, schema compatibility checks, audit trigger/permissions, a Compose profile, and backup/restore scripts. The production wiring must refuse to start until PostgreSQL migration compatibility is verified.
-
-The current host has Go 1.22.2, PostgreSQL 16.14, and the PostgreSQL client/backup tools installed. Docker remains optional for the Compose profile and is unavailable on this host, so the local PostgreSQL path is the verified path; no Docker/Compose result is claimed.
+Docker and Docker Compose are optional for the included Compose profile. They are unavailable on the verification host, so Docker/Compose was not run and no Docker result is claimed.
 
 ## Local commands
 
@@ -29,24 +36,35 @@ The current host has Go 1.22.2, PostgreSQL 16.14, and the PostgreSQL client/back
 # Private root setup; run as an operator, not from the source checkout.
 sudo scripts/setup-root.sh
 
-# Development/test server uses a dedicated temporary root explicitly.
+# Development/test server uses an explicitly supplied temporary/private root.
 export EMBER_TEST_DATABASE_URL='postgres:///ember_phase1?host=/var/run/postgresql'
 go test ./... -count=1
 make test-isolation
+make fmt-check
 go vet ./...
 go build ./cmd/...
-go run ./cmd/emberd --blob-root /var/lib/ember/blob --auth-file /etc/ember/auth.json
+python3 scripts/contract-check.py
+sh -n scripts/setup-root.sh scripts/backup-restore-smoke.sh
+
+go run ./cmd/emberd \
+  --blob-root /var/lib/ember/blob \
+  --auth-file /etc/ember/auth.json \
+  --database-url "$EMBER_TEST_DATABASE_URL"
 
 # PostgreSQL backup/restore evidence against an installed local PostgreSQL.
 export EMBER_DATABASE_URL="$EMBER_TEST_DATABASE_URL"
 scripts/backup-restore-smoke.sh
 
-# Optional Docker Compose profile (Docker is not required for the local path).
+# Optional Compose profile; not available on the current host.
 docker compose --profile postgres up -d postgres
 ```
 
-The server does not use a current-directory fallback for Blob storage. Test fixtures use `t.TempDir()` and assert that writes remain under that root.
+`emberd` requires an explicit Blob root, a mode-0600 auth file, and PostgreSQL via `--database-url` or `EMBER_DATABASE_URL`. It has no current-directory storage fallback. The in-memory control plane is opt-in only with `--dev-memory-control-plane` for local contract work.
 
-## Private boundary
+## Private boundary and caveats
 
-Do not publish this repository, add a public remote, deploy it, contact external services, or create paid cloud resources as part of Phase 1.
+- Keep this repository private and use local PostgreSQL/filesystem resources only for Phase 1.
+- Do not describe the API as Azure-compatible; it is Azure-shaped and Ember-owned.
+- No later control-plane services, asynchronous transfers, cloud deployment, public remote, secrets, paid resource, or external service is part of this implementation.
+- Test fixtures use temporary directories. Production-mode filesystem initialization refuses unsafe provider roots and rejects symlink escapes.
+- A disposable verification database may retain test rows after checks; this does not change the repository state. Docker/Compose remains unverified because Docker is unavailable on the host.
