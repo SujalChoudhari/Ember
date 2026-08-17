@@ -38,7 +38,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    request[HTTP PUT /api/v1/data/buckets/{bucket}/objects/{key}\nContent-Length + Content-Digest + Idempotency-Key]
+    request["HTTP PUT /api/v1/data/buckets/:bucket/objects/:key\nContent-Length + Content-Digest + Idempotency-Key"]
     server[Server.serveHTTP]
     principal[Auth.Authenticate\nPrincipal + role/scope]
     method[ControlPlane.PutObjectStream]
@@ -49,7 +49,7 @@ flowchart TB
     temp[Create provider-generated file\nunder staging/]
     hash[Stream exact bytes\ncompute SHA-256 and enforce length]
     sync1[Sync staged file and directory]
-    opaque[Create opaque object path\nobjects/{bucket}/{shard}/{version}.blob]
+    opaque["Create opaque object path\nobjects/:bucket/:shard/:version.blob"]
     commitfs[Rename staged file and sync object directory]
     tx[PostgreSQL transaction]
     op[Insert operation]
