@@ -1,0 +1,26 @@
+errorMappings:
+  InvalidRequest: 400
+  InvalidScope: 400
+  Unauthorized: 401
+  Forbidden: 403
+  NotFound: 404
+  AlreadyExists: 409
+  Conflict: 409
+  ResourceLocked: 409
+  DependencyExists: 409
+  IdempotencyConflict: 409
+  RecoveryRequired: 409
+  QuotaExceeded: 413
+  PayloadTooLarge: 413
+  PathUnsafe: 422
+  ChecksumMismatch: 422
+  ObjectNotCommitted: 422
+  ObjectCorrupt: 500
+  InternalError: 500
+  ProviderUnavailable: 503
+  MigrationRequired: 503
+  ProviderTimeout: 504
+retry:
+  maxAttempts: 3
+  backoffMillis: [100, 500, 2000]
+  idempotencyRetention: 24h
