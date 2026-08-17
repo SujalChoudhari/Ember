@@ -3,24 +3,33 @@ package postgres_test
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"ember.local/ember/internal/ember"
 	"ember.local/ember/internal/persistence/postgres"
+	_ "github.com/lib/pq"
 )
 
 func integrationStore(t *testing.T) (*postgres.Store, *ember.FileStore) {
 	t.Helper()
-	url := os.Getenv("EMBER_TEST_DATABASE_URL")
-	if url == "" {
+	return integrationStoreAtURL(t, os.Getenv("EMBER_TEST_DATABASE_URL"))
+}
+
+func integrationStoreAtURL(t *testing.T, databaseURL string) (*postgres.Store, *ember.FileStore) {
+	t.Helper()
+	if databaseURL == "" {
 		t.Skip("EMBER_TEST_DATABASE_URL is not set")
 	}
 	root := t.TempDir()
@@ -30,7 +39,7 @@ func integrationStore(t *testing.T) (*postgres.Store, *ember.FileStore) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	store, err := postgres.Open(ctx, url, files)
+	store, err := postgres.Open(ctx, databaseURL, files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +48,39 @@ func integrationStore(t *testing.T) (*postgres.Store, *ember.FileStore) {
 		t.Fatal(err)
 	}
 	return store, files
+}
+
+func isolatedDatabaseURL(t *testing.T) string {
+	t.Helper()
+	baseURL := os.Getenv("EMBER_TEST_DATABASE_URL")
+	if baseURL == "" {
+		t.Skip("EMBER_TEST_DATABASE_URL is not set")
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		t.Fatalf("parse test database URL: %v", err)
+	}
+	rawDB, err := sql.Open("postgres", baseURL)
+	if err != nil {
+		t.Fatalf("open test database for isolated schema: %v", err)
+	}
+	schema := "ember_test_" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := rawDB.ExecContext(ctx, "CREATE SCHEMA "+schema); err != nil {
+		_ = rawDB.Close()
+		t.Fatalf("create isolated test schema: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cleanupCancel()
+		_, _ = rawDB.ExecContext(cleanupCtx, "DROP SCHEMA "+schema+" CASCADE")
+		_ = rawDB.Close()
+	})
+	query := parsed.Query()
+	query.Set("options", fmt.Sprintf("-csearch_path=%s", schema))
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func TestPostgresGoldenFlowPersistsControlState(t *testing.T) {
@@ -138,7 +180,8 @@ func TestPostgresGoldenFlowPersistsControlState(t *testing.T) {
 }
 
 func TestPostgresOpenRefusesIncompatibleSchema(t *testing.T) {
-	store, files := integrationStore(t)
+	databaseURL := isolatedDatabaseURL(t)
+	store, files := integrationStoreAtURL(t, databaseURL)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err := store.DB().ExecContext(ctx, "UPDATE schema_meta SET version=99, compatible_min=99, compatible_max=99 WHERE component='phase1'"); err != nil {
@@ -147,7 +190,7 @@ func TestPostgresOpenRefusesIncompatibleSchema(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	_, err := postgres.Open(ctx, os.Getenv("EMBER_TEST_DATABASE_URL"), files)
+	_, err := postgres.Open(ctx, databaseURL, files)
 	if err == nil {
 		t.Fatal("expected incompatible schema to refuse startup")
 	}
