@@ -1,0 +1,11 @@
+# Private local credentials and runtime state
+.env
+auth.json
+*.token
+var/
+
+# Go artifacts
+/bin/
+*.test
+coverage.out
+__pycache__/

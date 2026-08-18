@@ -1,0 +1,17 @@
+openapi: 3.0.3
+info:
+  title: Ember private Phase 1 API
+  version: 1.0.0
+  description: Ember-owned Azure-shaped API; not Azure REST compatibility.
+paths:
+  /api/v1/operations/{operationId}:
+    get:
+      parameters: [{name: operationId, in: path, required: true, schema: {type: string}}]
+      responses:
+        '200': {description: operation}
+        '404': {description: not found}
+  /api/v1/data/buckets/{bucketId}/objects/{key}:
+    put: {responses: {'201': {description: committed object}, '409': {description: recovery or conflict}, '422': {description: checksum/path error}}}
+    get: {responses: {'200': {description: exact bytes}, '404': {description: not found}}}
+    head: {responses: {'200': {description: metadata}, '404': {description: not found}}}
+    delete: {responses: {'204': {description: deleted}}}
