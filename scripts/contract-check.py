@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Static contract checks for the published private Ember Phase 1 boundary."""
+import subprocess
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
@@ -25,7 +26,14 @@ migration_sql = (root / "migrations/0001_phase1.sql").read_text()
 for required_item in ["schema_meta", "audit_events", "ember_audit_append_only", "blob_objects", "repair_findings"]:
     assert required_item in migration_sql, required_item
 assert "RESOLVE_BENEATH" in (root / "README.md").read_text() or "resolveBeneath" in (root / "internal/ember/openat2_linux.go").read_text()
-git_config = (root / ".git/config").read_text() if (root / ".git/config").exists() else ""
+origin_result = subprocess.run(
+    ["git", "config", "--local", "--get", "remote.origin.url"],
+    cwd=root,
+    check=False,
+    capture_output=True,
+    text=True,
+)
+git_origin = origin_result.stdout.strip() if origin_result.returncode == 0 else ""
 expected_origin = "https://github.com/SujalChoudhari/Ember.git"
-assert '[remote "origin"]' in git_config and expected_origin in git_config, "origin must point to the private Ember repository"
+assert git_origin == expected_origin, "origin must point to the private Ember repository"
 print("static contract checks passed: scope, storage, idempotency, recovery, HTTP, migration, and private-origin assertions")
