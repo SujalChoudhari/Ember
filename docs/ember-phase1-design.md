@@ -38,25 +38,25 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    request["HTTP PUT /api/v1/data/buckets/:bucket/objects/:key\nContent-Length + Content-Digest + Idempotency-Key"]
+    request["HTTP PUT /api/v1/data/buckets/:bucket/objects/:key<br/>Content-Length + Content-Digest + Idempotency-Key"]
     server[Server.serveHTTP]
-    principal[Auth.Authenticate\nPrincipal + role/scope]
+    principal["Auth.Authenticate<br/>Principal + role/scope"]
     method[ControlPlane.PutObjectStream]
-    resource[Load bucket resource\nand authorize object:put]
-    replay[Read 24-hour idempotency record]
+    resource["Load bucket resource<br/>and authorize object:put"]
+    replay["Read 24-hour idempotency record"]
     stage[FileStore.WriteReader]
-    validate[Validate bucket/key/size/quota]
-    temp[Create provider-generated file\nunder staging/]
-    hash[Stream exact bytes\ncompute SHA-256 and enforce length]
-    sync1[Sync staged file and directory]
-    opaque["Create opaque object path\nobjects/:bucket/:shard/:version.blob"]
-    commitfs[Rename staged file and sync object directory]
+    validate["Validate bucket/key/size/quota"]
+    temp["Create provider-generated file<br/>under staging/"]
+    hash["Stream exact bytes<br/>compute SHA-256 and enforce length"]
+    sync1["Sync staged file and directory"]
+    opaque["Create opaque object path<br/>objects/:bucket/:shard/:version.blob"]
+    commitfs["Rename staged file and sync object directory"]
     tx[PostgreSQL transaction]
     op[Insert operation]
-    object[Insert or replace blob_objects metadata]
-    idem[Insert idempotency record\nexpires after 24 hours]
+    object["Insert or replace blob_objects metadata"]
+    idem["Insert idempotency record<br/>expires after 24 hours"]
     audit[Append redacted audit event]
-    response[201 object + operation\nETag + X-Ember-Version-ID]
+    response["201 object + operation<br/>ETag + X-Ember-Version-ID"]
 
     request --> server --> principal --> method
     method --> resource --> replay
