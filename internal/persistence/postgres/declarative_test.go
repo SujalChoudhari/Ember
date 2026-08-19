@@ -111,6 +111,21 @@ func TestPostgresDeclarativeApprovedDeleteOrdersChildrenBeforeParents(t *testing
 	if result == nil || len(result.Operations) != 2 {
 		t.Fatalf("approved PostgreSQL delete result=%#v, want two operations", result)
 	}
+	operationLogicalIDs := make([]string, 0, len(result.Operations))
+	for _, operation := range result.Operations {
+		if operation == nil {
+			t.Fatal("approved PostgreSQL delete returned a nil operation")
+		}
+		for _, entry := range result.Plan.Entries {
+			if entry.OperationID == operation.ID {
+				operationLogicalIDs = append(operationLogicalIDs, entry.LogicalID)
+				break
+			}
+		}
+	}
+	if len(operationLogicalIDs) != len(result.Operations) || operationLogicalIDs[0] != "z-bucket" || operationLogicalIDs[1] != "a-group" {
+		t.Fatalf("approved PostgreSQL delete operation order=%v, want [z-bucket a-group]", operationLogicalIDs)
+	}
 	states, err := store.ListDeclarativeResources(principal, postgresDeclarativeScope)
 	if err != nil {
 		t.Fatal(err)
