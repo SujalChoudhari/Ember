@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ type Store struct {
 	idempotency map[string]idempotencyRecord
 	audit       []AuditEvent
 	findings    map[string]Finding
+	declarative map[string]DeclarativeResourceState
 	sequence    uint64
 }
 
@@ -35,6 +37,7 @@ func NewStore(fileStore *FileStore) *Store {
 		locks:       map[string]map[string]Lock{},
 		idempotency: map[string]idempotencyRecord{},
 		findings:    map[string]Finding{},
+		declarative: map[string]DeclarativeResourceState{},
 	}
 }
 
@@ -220,6 +223,83 @@ func (store *Store) GetResource(principal Principal, resourceID, requestID, corr
 		return nil, ErrForbidden
 	}
 	return resource, nil
+}
+
+func (store *Store) ListResources(principal Principal, scope, requestID, correlationID string) ([]*Resource, error) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if !allowed(principal.Role, "read") {
+		return nil, ErrForbidden
+	}
+	resources := make([]*Resource, 0)
+	for _, resource := range store.resources {
+		if scope != "" && !strings.HasPrefix(resource.Scope, scope) {
+			continue
+		}
+		if !inScope(principal, resource.Scope) {
+			continue
+		}
+		copyOfResource := *resource
+		copyOfResource.Tags = cloneResourceTags(resource.Tags)
+		resources = append(resources, &copyOfResource)
+	}
+	sort.Slice(resources, func(left, right int) bool { return resources[left].ID < resources[right].ID })
+	return resources, nil
+}
+
+func (store *Store) UpdateResource(principal Principal, resourceID, desiredState string, tags map[string]string, requestID, correlationID string) (*Resource, *Operation, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	resource, found := store.resources[resourceID]
+	if !found {
+		return nil, nil, ErrNotFound
+	}
+	if err := store.authorizeLocked(principal, "resource:update", resource.Scope, resourceID, requestID, correlationID); err != nil {
+		return nil, nil, err
+	}
+	if strings.TrimSpace(desiredState) == "" {
+		return nil, nil, ErrInvalidRequest
+	}
+	resource.DesiredState = desiredState
+	resource.Tags = cloneResourceTags(tags)
+	resource.UpdatedAt = time.Now().UTC()
+	operation := store.createOperationLocked(principal, "resource:update", resource.ID, resource.Scope, requestID, correlationID)
+	store.recordAuditEventLocked(principal, "resource:update", "succeeded", resource.ID, resource.Scope, requestID, correlationID, "", "")
+	copyOfResource := *resource
+	copyOfResource.Tags = cloneResourceTags(resource.Tags)
+	return &copyOfResource, operation, nil
+}
+
+func (store *Store) RecordOperation(principal Principal, action, status, resourceID, scope, requestID, correlationID, errorCode, reason string) (*Operation, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if !inScope(principal, scope) || !allowed(principal.Role, "deployment:apply") {
+		store.recordAuditEventLocked(principal, action, "denied", resourceID, scope, requestID, correlationID, "forbidden", "")
+		return nil, ErrForbidden
+	}
+	if status == "" {
+		return nil, ErrInvalidRequest
+	}
+	createdAt := time.Now().UTC()
+	operation := &Operation{ID: store.nextIdentifier("op"), Action: action, Status: status, ResourceID: resourceID, Scope: scope, RequestID: requestID, CorrelationID: correlationID, ErrorCode: errorCode, CreatedAt: createdAt, UpdatedAt: createdAt}
+	store.operations[operation.ID] = operation
+	outcome := status
+	if outcome != "succeeded" && outcome != "failed" {
+		outcome = "failed"
+	}
+	store.recordAuditEventLocked(principal, action, outcome, resourceID, scope, requestID, correlationID, reason, "")
+	return operation, nil
+}
+
+func cloneResourceTags(tags map[string]string) map[string]string {
+	if len(tags) == 0 {
+		return map[string]string{}
+	}
+	copyOfTags := make(map[string]string, len(tags))
+	for key, value := range tags {
+		copyOfTags[key] = value
+	}
+	return copyOfTags
 }
 
 func (store *Store) GetOperation(principal Principal, operationID, requestID, correlationID string) (*Operation, error) {
@@ -488,6 +568,7 @@ func (store *Store) Reset() error {
 	store.idempotency = map[string]idempotencyRecord{}
 	store.audit = nil
 	store.findings = map[string]Finding{}
+	store.declarative = map[string]DeclarativeResourceState{}
 	store.sequence = 0
 	return nil
 }

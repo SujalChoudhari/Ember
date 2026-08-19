@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -49,7 +50,8 @@ func (store *Store) CreateGroup(principal ember.Principal, name, scope, idempote
 	}
 	createdAt := time.Now().UTC()
 	resourceID, operationID := generateID("rg"), generateID("op")
-	if _, err := transaction.ExecContext(ctx, `INSERT INTO resources(id,name,type,scope,desired_state,observed_state) VALUES($1,$2,'resourceGroup',$3,'created','created')`, resourceID, name, scope); err != nil {
+	tagsJSON := tagsFromRawPayload(rawPayload)
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO resources(id,name,type,scope,desired_state,observed_state,tags) VALUES($1,$2,'resourceGroup',$3,'created','created',$4)`, resourceID, name, scope, tagsJSON); err != nil {
 		return nil, nil, translateDatabaseError(err)
 	}
 	if _, err := transaction.ExecContext(ctx, `INSERT INTO operations(id,action,status,resource_id,scope,request_id,correlation_id,created_at,updated_at) VALUES($1,'group:create','succeeded',$2,$3,$4,$5,$6,$6)`, operationID, resourceID, scope, requestID, correlationID, createdAt); err != nil {
@@ -112,7 +114,8 @@ func (store *Store) CreateBucket(principal ember.Principal, groupID, name, scope
 	}
 	createdAt := time.Now().UTC()
 	resourceID, operationID := generateID("res"), generateID("op")
-	if _, err := transaction.ExecContext(ctx, `INSERT INTO resources(id,name,type,parent_id,scope,desired_state,observed_state) VALUES($1,$2,'Ember.Blob/bucket',$3,$4,'created','created')`, resourceID, name, groupID, scope); err != nil {
+	tagsJSON := tagsFromRawPayload(rawPayload)
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO resources(id,name,type,parent_id,scope,desired_state,observed_state,tags) VALUES($1,$2,'Ember.Blob/bucket',$3,$4,'created','created',$5)`, resourceID, name, groupID, scope, tagsJSON); err != nil {
 		return nil, nil, translateDatabaseError(err)
 	}
 	if _, err := transaction.ExecContext(ctx, `INSERT INTO operations(id,action,status,resource_id,scope,request_id,correlation_id,created_at,updated_at) VALUES($1,'bucket:create','succeeded',$2,$3,$4,$5,$6,$6)`, operationID, resourceID, scope, requestID, correlationID, createdAt); err != nil {
@@ -130,6 +133,20 @@ func (store *Store) CreateBucket(principal ember.Principal, groupID, name, scope
 	resource, _ := scanResource(store.db.QueryRowContext(ctx, resourceSelect+` WHERE id=$1`, resourceID))
 	operation, _ := scanOperation(store.db.QueryRowContext(ctx, operationSelect+` WHERE id=$1`, operationID))
 	return resource, operation, nil
+}
+
+func tagsFromRawPayload(rawPayload []byte) []byte {
+	var payload struct {
+		Tags map[string]string `json:"tags"`
+	}
+	if err := json.Unmarshal(rawPayload, &payload); err != nil || payload.Tags == nil {
+		return []byte(`{}`)
+	}
+	tags, err := json.Marshal(payload.Tags)
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return tags
 }
 
 func (store *Store) GetResource(principal ember.Principal, resourceID, requestID, correlationID string) (*ember.Resource, error) {

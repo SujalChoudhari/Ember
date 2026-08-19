@@ -7,15 +7,19 @@ import (
 	"fmt"
 )
 
-//go:embed migrations/0001_phase1.sql
+//go:embed migrations/0001_phase1.sql migrations/0002_phase2.sql
 var migrationFS embed.FS
 
 func Migrations() []string {
-	migrationSQL, err := migrationFS.ReadFile("migrations/0001_phase1.sql")
+	firstMigration, err := migrationFS.ReadFile("migrations/0001_phase1.sql")
 	if err != nil {
 		panic(err)
 	}
-	return []string{string(migrationSQL)}
+	secondMigration, err := migrationFS.ReadFile("migrations/0002_phase2.sql")
+	if err != nil {
+		panic(err)
+	}
+	return []string{string(firstMigration), string(secondMigration)}
 }
 
 func ApplyMigrations(ctx context.Context, database *sql.DB, migrations []string) error {

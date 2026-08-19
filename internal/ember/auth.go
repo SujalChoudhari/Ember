@@ -90,7 +90,7 @@ func allowed(role, action string) bool {
 	}
 	if role == "editor" {
 		switch action {
-		case "read", "group:create", "group:delete", "bucket:create", "bucket:delete", "object:put", "object:delete":
+		case "read", "deployment:apply", "resource:update", "group:create", "group:delete", "bucket:create", "bucket:delete", "object:put", "object:delete":
 			return true
 		}
 	}
