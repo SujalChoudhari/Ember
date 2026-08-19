@@ -18,7 +18,11 @@ func (store *Store) ListDeclarativeResources(principal Principal, scope string) 
 	states := make([]DeclarativeResourceState, 0)
 	for _, state := range store.declarative {
 		if scope == "" || state.Scope == scope {
-			state.SpecJSON = append([]byte(nil), state.SpecJSON...)
+			redactedSpecJSON, err := RedactDeclarativeSpecJSON(state.SpecJSON)
+			if err != nil {
+				return nil, err
+			}
+			state.SpecJSON = redactedSpecJSON
 			states = append(states, state)
 		}
 	}
@@ -100,12 +104,16 @@ func (store *Store) ApplyDeclarativeResource(principal Principal, spec ResourceS
 }
 
 func (store *Store) SaveDeclarativeState(principal Principal, state DeclarativeResourceState, requestID, correlationID string) error {
+	redactedSpecJSON, err := RedactDeclarativeSpecJSON(state.SpecJSON)
+	if err != nil {
+		return err
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if !inScope(principal, state.Scope) || !allowed(principal.Role, "deployment:apply") {
 		return ErrForbidden
 	}
-	state.SpecJSON = append([]byte(nil), state.SpecJSON...)
+	state.SpecJSON = append([]byte(nil), redactedSpecJSON...)
 	store.declarative[declarativeStateKey(state.Scope, state.LogicalID)] = state
 	return nil
 }

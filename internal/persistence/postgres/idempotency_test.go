@@ -1,33 +1,13 @@
-package postgres
+package postgres_test
 
 import (
-	"context"
-	"os"
 	"testing"
-	"time"
 
 	"ember.local/ember/internal/ember"
 )
 
 func TestPostgresCreateGroupAndBucketIdempotency(t *testing.T) {
-	databaseURL := os.Getenv("EMBER_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("EMBER_TEST_DATABASE_URL is not set")
-	}
-	fileStore, err := ember.NewFileStore(t.TempDir(), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	testContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	store, err := Open(testContext, databaseURL, fileStore)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if _, err := store.DB().ExecContext(testContext, "TRUNCATE repair_findings, blob_objects, locks, idempotency_records, audit_events, operations, resources CASCADE"); err != nil {
-		t.Fatal(err)
-	}
+	store, _, _ := integrationStore(t)
 	ownerPrincipal := ember.Principal{Name: "local-owner", Role: "owner", Scope: "*"}
 	group, groupOperation, err := store.CreateGroup(ownerPrincipal, "demo", "i/t/s/demo", "group-1", []byte("demo"), "req", "corr")
 	if err != nil {

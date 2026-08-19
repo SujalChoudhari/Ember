@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ import (
 )
 
 func TestPostgresGoldenFlowPersistsControlState(t *testing.T) {
-	store, fileStore := integrationStore(t)
+	store, fileStore, databaseURL := integrationStore(t)
 	server := httptest.NewServer(ember.NewServer(store, ember.DefaultTestAuth()).Handler())
 	defer server.Close()
 	client := server.Client()
@@ -87,7 +86,7 @@ func TestPostgresGoldenFlowPersistsControlState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	storeAfterRestart, err := postgres.Open(testContext, os.Getenv("EMBER_TEST_DATABASE_URL"), fileStoreAfterRestart)
+	storeAfterRestart, err := postgres.Open(testContext, databaseURL, fileStoreAfterRestart)
 	if err != nil {
 		t.Fatal(err)
 	}

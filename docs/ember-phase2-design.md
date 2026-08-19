@@ -9,23 +9,28 @@ remain authoritative for mutations.
 
 The format is Ember-owned and intentionally not a Bicep or Azure compatibility
 claim. Phase 2 supports `resourceGroup` and `Ember.Blob/bucket` resources, parameters,
-tags, outputs, lifecycle policy, and secret references. Secret values are never
-part of the document model or plan output.
+tags, outputs, lifecycle policy, and secret references. Secret values are not
+resolved by this engine. Plan changes and persisted per-resource `SpecJSON`
+apply a bounded redaction policy: secret-reference names/keys and values below
+secret-, key-, password-, token-, credential-, authorization-, and private-key-
+like property names are replaced with `[REDACTED]`. This is not arbitrary secret
+storage: values under names outside that policy can still be retained, so
+callers must use `secretRefs` and avoid inline secrets.
 
 ## HLD — high-level design
 
 ```mermaid
 flowchart LR
-    operator["Operator or CI\nember.yaml / ember.json"] --> engine["internal/ember.DeclarativeEngine"]
-    engine --> contract["ParseDocument\nDocument.Validate"]
-    contract --> graph["BuildDependencyGraph\ndeterministic topological order"]
-    graph --> plan["Plan\ncreate / update / no-op / delete"]
-    plan --> gate["ApplyOptions\nexplicit destructive approval"]
-    gate --> authority{ "DeclarativeAuthority" }
-    authority -.-> memory["internal/ember.Store\nexplicit test/dev adapter"]
-    authority -.-> postgres["internal/persistence/postgres.Store\nPostgreSQL adapter"]
-    memory --> memstate["in-memory desired state\noperations + audit"]
-    postgres --> db[("PostgreSQL\nresources / operations / audit_events / declarative_states")]
+    operatorNode["Operator or CI\nember.yaml / ember.json"] --> engineNode["internal/ember.DeclarativeEngine"]
+    engineNode --> contractNode["ParseDocument\nDocument.Validate"]
+    contractNode --> dependencyGraph["BuildDependencyGraph\ndeterministic topological order"]
+    dependencyGraph --> planNode["Plan\ncreate / update / no-op / delete"]
+    planNode --> gateNode["ApplyOptions\nexplicit destructive approval"]
+    gateNode --> authorityNode{"DeclarativeAuthority"}
+    authorityNode -.-> memoryNode["internal/ember.Store\nexplicit test/dev adapter"]
+    authorityNode -.-> postgresNode["internal/persistence/postgres.Store\nPostgreSQL adapter"]
+    memoryNode --> memoryState["in-memory desired state\noperations + audit"]
+    postgresNode --> databaseNode[("PostgreSQL\nresources / operations / audit_events / declarative_states")]
 ```
 
 The engine reads the current managed state through `DeclarativeAuthority`, computes
@@ -39,22 +44,22 @@ apply returns its preview and performs no destructive mutation.
 
 ```mermaid
 flowchart TB
-    source["ember.yaml or ember.json bytes"] --> parse["ParseDocument\nYAML KnownFields / JSON DisallowUnknownFields"]
-    parse --> validate["Document.Validate\nember/v1, schema, references, tags, lifecycle"]
-    validate --> dependency["BuildDependencyGraph\nparent + dependsOn edges"]
-    dependency --> current["ListDeclarativeResources\nread managed state for scope"]
-    current --> hash["Canonical resource JSON\nSHA-256 spec hash"]
-    hash --> diff["diffResourceSpecs\npath-level PlanChange entries"]
-    diff --> preview["Plan\nentries + order + blocked edges"]
-    preview --> approval{ "Destructive entry approved?" }
-    approval -->|"no"| blocked["Mark blocked\nreturn ErrDestructiveApprovalRequired\nno mutation"]
-    approval -->|"yes"| apply["Apply entries in plan order"]
-    apply --> createUpdate["ApplyDeclarativeResource\ncreate or update"]
-    createUpdate --> save["SaveDeclarativeState\nlogical ID + resource ID + hash"]
-    apply --> delete["ApplyDeclarativeResource delete\nstale children before parents"]
-    delete --> cleanup["DeleteDeclarativeState\nidempotent after resource FK cascade"]
-    save --> result["ApplyResult\nplan + operation IDs"]
-    cleanup --> result
+    sourceNode["ember.yaml or ember.json bytes"] --> parseNode["ParseDocument\nYAML KnownFields / JSON DisallowUnknownFields"]
+    parseNode --> validateNode["Document.Validate\nember/v1, schema, references, tags, lifecycle"]
+    validateNode --> dependencyGraph["BuildDependencyGraph\nparent + dependsOn edges"]
+    dependencyGraph --> currentState["ListDeclarativeResources\nread managed state for scope"]
+    currentState --> hashNode["Canonical resource JSON\nSHA-256 spec hash"]
+    hashNode --> diffNode["diffResourceSpecs\npath-level PlanChange entries"]
+    diffNode --> previewNode["Plan\nentries + order + blocked edges"]
+    previewNode --> approvalGate{"Destructive entry approved?"}
+    approvalGate -->|"no"| blockedNode["Mark blocked\nreturn ErrDestructiveApprovalRequired\nno mutation"]
+    approvalGate -->|"yes"| applyNode["Apply entries in plan order"]
+    applyNode --> createUpdateNode["ApplyDeclarativeResource\ncreate or update"]
+    createUpdateNode --> saveNode["SaveDeclarativeState\nlogical ID + resource ID + hash"]
+    applyNode --> deleteNode["ApplyDeclarativeResource delete\nstale children before parents"]
+    deleteNode --> cleanupNode["DeleteDeclarativeState\nidempotent after resource FK cascade"]
+    saveNode --> resultNode["ApplyResult\nplan + operation IDs"]
+    cleanupNode --> resultNode
 ```
 
 `Plan.Order` and every `PlanEntry.Order` expose the execution order. Parent and
@@ -63,6 +68,27 @@ For stale resources, persisted `ParentID` values provide a deterministic
 child-before-parent deletion order. The PostgreSQL declarative row is linked to the
 resource by a foreign key; cleanup therefore treats a row already removed by the
 successful resource deletion as converged.
+
+## Secret handling boundary
+
+The declarative input can carry arbitrary `ResourceSpec.Properties` values for
+provider-facing resource configuration, so the document model is not a general
+secret vault. The engine does not resolve secret references or promise that an
+arbitrary property name is safe. Before a plan change is emitted or declarative
+state is persisted, the bounded policy below replaces values with `[REDACTED]`:
+
+- `secretRefs` retain their array/object shape, but each reference `name` and
+  `key` is redacted;
+- property/path names containing or equal to `secret`, `key`, `password`,
+  `token`, `credential`, `authorization`, `bearer`, `connectionString`, or
+  private-/API-/access-key-like names are redacted, including nested values;
+- malformed persisted state fails closed with an input-safe error instead of being
+  copied into a plan change;
+
+The full canonical resource JSON is used only to calculate the convergence hash;
+the persisted `SpecJSON` is the redacted, shape-preserving form. Callers must use
+`secretRefs` and avoid inline secrets; values under names outside this bounded
+policy can still be retained.
 
 ## Class/interface — authority and plan contracts
 
@@ -173,10 +199,10 @@ sequenceDiagram
     Engine->>Engine: hash specs and build Plan entries
 
     alt malformed document or dependency cycle
-        Engine-->>Operator: error; no authority mutation
+        Engine-->>Operator: error and no authority mutation
     else destructive entry without approval
         Engine-->>Operator: Plan + ErrDestructiveApprovalRequired
-    else approved create or update
+    else approved create/update
         loop each ordered create/update entry
             Engine->>Authority: ApplyDeclarativeResource(spec, action, request, correlation)
             Authority->>PG: resource transaction
@@ -192,7 +218,7 @@ sequenceDiagram
         loop child before parent
             Engine->>Authority: ApplyDeclarativeResource(stale spec, delete, request, correlation)
             Authority->>PG: delete resource and record operation/audit
-            PG->>DB: delete resource; declarative state cascades
+            PG->>DB: delete resource and declarative state cascades
             DB-->>PG: committed delete
             Engine->>Authority: DeleteDeclarativeState cleanup
             Authority-->>Engine: already converged or deleted

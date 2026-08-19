@@ -38,6 +38,11 @@ func (store *Store) ListDeclarativeResources(principal ember.Principal, scope st
 				return nil, fmt.Errorf("decode declarative lifecycle: %w", err)
 			}
 		}
+		redactedSpecJSON, err := ember.RedactDeclarativeSpecJSON(state.SpecJSON)
+		if err != nil {
+			return nil, err
+		}
+		state.SpecJSON = redactedSpecJSON
 		states = append(states, state)
 	}
 	if err := rows.Err(); err != nil {
@@ -139,11 +144,15 @@ func (store *Store) SaveDeclarativeState(principal ember.Principal, state ember.
 	if !ember.Allowed(principal, "deployment:apply", state.Scope) {
 		return ember.ErrForbidden
 	}
+	redactedSpecJSON, err := ember.RedactDeclarativeSpecJSON(state.SpecJSON)
+	if err != nil {
+		return err
+	}
 	lifecycleJSON, err := json.Marshal(state.Lifecycle)
 	if err != nil {
 		return fmt.Errorf("encode declarative lifecycle: %w", err)
 	}
-	_, err = store.db.ExecContext(ctx, `INSERT INTO declarative_states(logical_id,resource_id,api_version,type,scope,parent_id,spec_hash,spec_json,lifecycle) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9) ON CONFLICT(scope,logical_id) DO UPDATE SET resource_id=excluded.resource_id,api_version=excluded.api_version,type=excluded.type,parent_id=excluded.parent_id,spec_hash=excluded.spec_hash,spec_json=excluded.spec_json,lifecycle=excluded.lifecycle,updated_at=now()`, state.LogicalID, state.ResourceID, state.APIVersion, state.Type, state.Scope, state.ParentID, state.SpecHash, state.SpecJSON, lifecycleJSON)
+	_, err = store.db.ExecContext(ctx, `INSERT INTO declarative_states(logical_id,resource_id,api_version,type,scope,parent_id,spec_hash,spec_json,lifecycle) VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8,$9) ON CONFLICT(scope,logical_id) DO UPDATE SET resource_id=excluded.resource_id,api_version=excluded.api_version,type=excluded.type,parent_id=excluded.parent_id,spec_hash=excluded.spec_hash,spec_json=excluded.spec_json,lifecycle=excluded.lifecycle,updated_at=now()`, state.LogicalID, state.ResourceID, state.APIVersion, state.Type, state.Scope, state.ParentID, state.SpecHash, redactedSpecJSON, lifecycleJSON)
 	return translateDatabaseError(err)
 }
 
@@ -182,5 +191,10 @@ func (store *Store) declarativeState(ctx context.Context, logicalID, scope strin
 			return state, fmt.Errorf("decode declarative lifecycle: %w", err)
 		}
 	}
+	redactedSpecJSON, err := ember.RedactDeclarativeSpecJSON(state.SpecJSON)
+	if err != nil {
+		return state, err
+	}
+	state.SpecJSON = redactedSpecJSON
 	return state, nil
 }

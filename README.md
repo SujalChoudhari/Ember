@@ -36,8 +36,10 @@ Docker and Docker Compose are optional for the included Compose profile. They ar
 # Private root setup; run as an operator, not from the source checkout.
 sudo scripts/setup-root.sh
 
-# Development/test server uses an explicitly supplied temporary/private root.
-export EMBER_TEST_DATABASE_URL='postgres:///ember_phase1?host=/var/run/postgresql'
+# Tests require a newly created disposable local PostgreSQL database. The
+# integration harness creates a per-test schema, truncates only that schema,
+# and drops it during cleanup; never point this at a shared or phase-one DB.
+export EMBER_TEST_DATABASE_URL='postgres:///ember_test_control?host=/var/run/postgresql'
 go test ./... -count=1
 make test-isolation
 make fmt-check

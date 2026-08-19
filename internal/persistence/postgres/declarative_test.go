@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"ember.local/ember/internal/ember"
@@ -30,7 +31,7 @@ resources:
 }
 
 func TestPostgresDeclarativeApplyPersistsStateAndNoOpReplay(t *testing.T) {
-	store, _ := integrationStore(t)
+	store, _, _ := integrationStore(t)
 	engine := ember.NewDeclarativeEngine(store)
 	principal := ember.Principal{Name: "local-editor", Role: "editor", Scope: "*"}
 
@@ -98,7 +99,7 @@ resources:
 }
 
 func TestPostgresDeclarativeApprovedDeleteOrdersChildrenBeforeParents(t *testing.T) {
-	store, _ := integrationStore(t)
+	store, _, _ := integrationStore(t)
 	engine := ember.NewDeclarativeEngine(store)
 	principal := ember.Principal{Name: "local-owner", Role: "owner", Scope: "*"}
 	if _, err := engine.ApplyDocument(principal, []byte(postgresDeclarativeCascadeDocument()), "ember.yaml", ember.ApplyOptions{Scope: postgresDeclarativeScope, ApproveDestructive: true}); err != nil {
@@ -135,8 +136,59 @@ func TestPostgresDeclarativeApprovedDeleteOrdersChildrenBeforeParents(t *testing
 	}
 }
 
+func TestPostgresDeclarativeStateReadRedactsLegacyRawState(t *testing.T) {
+	store, _, _ := integrationStore(t)
+	engine := ember.NewDeclarativeEngine(store)
+	principal := ember.Principal{Name: "local-owner", Role: "owner", Scope: "*"}
+	result, err := engine.ApplyDocument(principal, []byte(`apiVersion: ember/v1
+resources:
+  - id: group
+    type: resourceGroup
+    name: demo
+    scope: i/t/s/postgres-declarative
+    properties:
+      password: postgres-fixture-password
+      privateKeyPem: postgres-fixture-private-key
+      safe: visible
+    secretRefs:
+      - name: postgres/fixture
+        key: password
+`), "ember.yaml", ember.ApplyOptions{Scope: postgresDeclarativeScope, ApproveDestructive: true})
+	if err != nil {
+		t.Fatalf("initial PostgreSQL declarative apply: %v", err)
+	}
+	var persistedJSON string
+	if err := store.DB().QueryRow(`SELECT spec_json::text FROM declarative_states WHERE resource_id=$1`, result.Plan.Entries[0].ResourceID).Scan(&persistedJSON); err != nil {
+		t.Fatalf("read persisted PostgreSQL declarative state: %v", err)
+	}
+	for _, forbidden := range []string{"postgres-fixture-password", "postgres-fixture-private-key", "postgres/fixture"} {
+		if strings.Contains(persistedJSON, forbidden) {
+			t.Fatalf("PostgreSQL persisted state exposed %q: %s", forbidden, persistedJSON)
+		}
+	}
+	if _, err := store.DB().Exec(`UPDATE declarative_states SET spec_json=$1::jsonb WHERE resource_id=$2`, `{"properties":{"password":"legacy-fixture-secret","safe":"visible"},"secretRefs":[{"name":"legacy/ref","key":"password"}]}`, result.Plan.Entries[0].ResourceID); err != nil {
+		t.Fatalf("seed legacy raw declarative state: %v", err)
+	}
+	states, err := store.ListDeclarativeResources(principal, postgresDeclarativeScope)
+	if err != nil {
+		t.Fatalf("list PostgreSQL declarative state: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states=%d, want 1", len(states))
+	}
+	stateJSON := string(states[0].SpecJSON)
+	for _, forbidden := range []string{"legacy-fixture-secret", "legacy/ref"} {
+		if strings.Contains(stateJSON, forbidden) {
+			t.Fatalf("PostgreSQL state exposed %q: %s", forbidden, stateJSON)
+		}
+	}
+	if !strings.Contains(stateJSON, "visible") {
+		t.Fatalf("safe state value was lost: %s", stateJSON)
+	}
+}
+
 func TestPostgresDeclarativeApplyBlocksUnapprovedDelete(t *testing.T) {
-	store, _ := integrationStore(t)
+	store, _, _ := integrationStore(t)
 	engine := ember.NewDeclarativeEngine(store)
 	principal := ember.Principal{Name: "local-owner", Role: "owner", Scope: "*"}
 	if _, err := engine.ApplyDocument(principal, []byte(postgresDeclarativeDocument()), "ember.yaml", ember.ApplyOptions{Scope: postgresDeclarativeScope, ApproveDestructive: true}); err != nil {

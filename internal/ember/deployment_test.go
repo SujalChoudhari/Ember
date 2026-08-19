@@ -268,6 +268,140 @@ resources:
 	}
 }
 
+func TestDeclarativePlanAndStateRedactSecretShapedValues(t *testing.T) {
+	store := declarativeStore(t)
+	engine := NewDeclarativeEngine(store)
+	principal := Principal{Name: "local-owner", Role: "owner", Scope: "*"}
+	initial := `apiVersion: ember/v1
+resources:
+  - id: group
+    type: resourceGroup
+    name: demo
+    scope: i/t/s/declarative
+    properties:
+      password: fixture-initial-password
+      apiKey: fixture-initial-api-key
+      privateKeyPem: fixture-initial-private-key
+      nested:
+        sessionToken: fixture-initial-session-token
+      safe: visible-before
+    secretRefs:
+      - name: prod/database
+        key: password
+`
+	initialResult, err := engine.ApplyDocument(principal, []byte(initial), "ember.yaml", ApplyOptions{Scope: declarativeScope, ApproveDestructive: true})
+	if err != nil {
+		t.Fatalf("apply initial secret-shaped document: %v", err)
+	}
+	operationJSON, err := json.Marshal(initialResult.Operations)
+	if err != nil {
+		t.Fatalf("encode operations: %v", err)
+	}
+	auditEvents, err := store.Audit(principal, declarativeScope)
+	if err != nil {
+		t.Fatalf("read audit events: %v", err)
+	}
+	auditJSON, err := json.Marshal(auditEvents)
+	if err != nil {
+		t.Fatalf("encode audit events: %v", err)
+	}
+	for _, payload := range []string{string(operationJSON), string(auditJSON)} {
+		for _, forbidden := range []string{"fixture-initial-password", "fixture-initial-api-key", "fixture-initial-private-key", "fixture-initial-session-token", "prod/database"} {
+			if strings.Contains(payload, forbidden) {
+				t.Fatalf("operation/audit payload exposed %q: %s", forbidden, payload)
+			}
+		}
+	}
+	states, err := store.ListDeclarativeResources(principal, declarativeScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("stored states=%d, want 1", len(states))
+	}
+	storedSpec := string(states[0].SpecJSON)
+	for _, forbidden := range []string{"fixture-initial-password", "fixture-initial-api-key", "fixture-initial-private-key", "fixture-initial-session-token", "prod/database"} {
+		if strings.Contains(storedSpec, forbidden) {
+			t.Fatalf("stored SpecJSON exposed %q: %s", forbidden, storedSpec)
+		}
+	}
+	var decodedStoredSpec ResourceSpec
+	if err := json.Unmarshal(states[0].SpecJSON, &decodedStoredSpec); err != nil {
+		t.Fatalf("redacted SpecJSON is not decodable: %v", err)
+	}
+	if len(decodedStoredSpec.Secrets) != 1 || decodedStoredSpec.Secrets[0].Name != declarativeRedactionMarker || decodedStoredSpec.Secrets[0].Key != declarativeRedactionMarker {
+		t.Fatalf("secret references were not shape-preserving redactions: %#v", decodedStoredSpec.Secrets)
+	}
+
+	updated := `apiVersion: ember/v1
+resources:
+  - id: group
+    type: resourceGroup
+    name: demo
+    scope: i/t/s/declarative
+    properties:
+      password: changed-secret-value
+      apiKey: changed-api-key
+      privateKeyPem: changed-private-key
+      nested:
+        sessionToken: changed-session-token
+      safe: visible-after
+    secretRefs:
+      - name: prod/rotated-database
+        key: rotated-password
+`
+	plan, err := engine.PlanDocument(principal, []byte(updated), "ember.yaml", declarativeScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"fixture-initial-password", "fixture-initial-api-key", "fixture-initial-private-key", "fixture-initial-session-token", "prod/database", "changed-secret-value", "changed-api-key", "changed-private-key", "changed-session-token", "prod/rotated-database", "rotated-password"} {
+		if strings.Contains(string(planJSON), forbidden) {
+			t.Fatalf("plan exposed %q: %s", forbidden, planJSON)
+		}
+	}
+	if !strings.Contains(string(planJSON), declarativeRedactionMarker) || !strings.Contains(string(planJSON), "visible-before") || !strings.Contains(string(planJSON), "visible-after") {
+		t.Fatalf("plan lost bounded redaction marker or safe values: %s", planJSON)
+	}
+	var secretReferenceChange *PlanChange
+	for index := range plan.Entries[0].Changes {
+		if plan.Entries[0].Changes[index].Path == "secretRefs" {
+			secretReferenceChange = &plan.Entries[0].Changes[index]
+			break
+		}
+	}
+	if secretReferenceChange == nil {
+		t.Fatalf("plan did not expose a secretRefs change: %#v", plan.Entries[0].Changes)
+	}
+	for side, value := range map[string]any{"before": secretReferenceChange.Before, "after": secretReferenceChange.After} {
+		references, ok := value.([]any)
+		if !ok || len(references) != 1 {
+			t.Fatalf("plan %s secretRefs lost array shape: %#v", side, value)
+		}
+		reference, ok := references[0].(map[string]any)
+		if !ok || reference["name"] != declarativeRedactionMarker || reference["key"] != declarativeRedactionMarker {
+			t.Fatalf("plan %s secretRefs were not shape-preserving redactions: %#v", side, value)
+		}
+	}
+
+	if _, err := engine.ApplyDocument(principal, []byte(updated), "ember.yaml", ApplyOptions{Scope: declarativeScope, ApproveDestructive: true}); err != nil {
+		t.Fatalf("apply updated secret-shaped document: %v", err)
+	}
+	replay, err := engine.ApplyDocument(principal, []byte(updated), "ember.yaml", ApplyOptions{Scope: declarativeScope, ApproveDestructive: true})
+	if err != nil {
+		t.Fatalf("replay updated secret-shaped document: %v", err)
+	}
+	if len(replay.Operations) != 0 || len(replay.Plan.Entries) != 1 || replay.Plan.Entries[0].Action != PlanNoop {
+		t.Fatalf("redacted state broke no-op replay: %#v", replay)
+	}
+	if _, err := engine.ApplyDocument(principal, []byte("apiVersion: ember/v1\nresources: []\n"), "ember.yaml", ApplyOptions{Scope: declarativeScope, ApproveDestructive: true}); err != nil {
+		t.Fatalf("delete from redacted persisted state: %v", err)
+	}
+}
+
 func TestDeclarativeDestructiveUpdateRequiresApprovalAndApplies(t *testing.T) {
 	store := declarativeStore(t)
 	engine := NewDeclarativeEngine(store)

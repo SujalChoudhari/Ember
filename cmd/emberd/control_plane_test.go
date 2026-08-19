@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"strings"
 	"testing"
 
@@ -37,10 +36,7 @@ func TestOpenControlPlaneUsesMemoryOnlyWhenExplicit(t *testing.T) {
 }
 
 func TestOpenControlPlaneUsesPostgresWhenConfigured(t *testing.T) {
-	databaseURL := os.Getenv("EMBER_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("EMBER_TEST_DATABASE_URL is not set")
-	}
+	databaseURL := isolatedControlPlaneDatabaseURL(t)
 	fileStore, err := ember.NewFileStore(t.TempDir(), false)
 	if err != nil {
 		t.Fatal(err)

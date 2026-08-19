@@ -608,7 +608,7 @@ func orderStaleStates(states []DeclarativeResourceState) []DeclarativeResourceSt
 func diffResourceSpecs(beforeJSON, afterJSON []byte) ([]PlanChange, bool) {
 	var before, after map[string]any
 	if json.Unmarshal(beforeJSON, &before) != nil || json.Unmarshal(afterJSON, &after) != nil {
-		return []PlanChange{{Path: "spec", Before: string(beforeJSON), After: string(afterJSON)}}, false
+		return []PlanChange{{Path: "spec", Before: declarativeRedactionMarker, After: declarativeRedactionMarker}}, false
 	}
 	changes := make([]PlanChange, 0)
 	destructive := false
@@ -665,7 +665,14 @@ func appendValueChanges(changes []PlanChange, destructive bool, path, root strin
 	if (root == "tags" || root == "properties") && !afterExists {
 		changeIsDestructive = true
 	}
-	changes = append(changes, PlanChange{Path: path, Before: before, After: after, Destructive: changeIsDestructive})
+	var safeBefore, safeAfter any
+	if beforeExists {
+		safeBefore = redactPlanValue(path, before)
+	}
+	if afterExists {
+		safeAfter = redactPlanValue(path, after)
+	}
+	changes = append(changes, PlanChange{Path: path, Before: safeBefore, After: safeAfter, Destructive: changeIsDestructive})
 	return changes, destructive || changeIsDestructive
 }
 
@@ -761,11 +768,15 @@ func (engine *DeclarativeEngine) Apply(principal Principal, document Document, o
 		if resource == nil || operation == nil {
 			return result, fmt.Errorf("declarative authority returned incomplete result for %s", entry.LogicalID)
 		}
-		hash, canonical, hashErr := resourceHash(resourceSpec)
+		hash, _, hashErr := resourceHash(resourceSpec)
 		if hashErr != nil {
 			return result, hashErr
 		}
-		state := DeclarativeResourceState{LogicalID: resourceSpec.ID, ResourceID: resource.ID, APIVersion: DeclarativeAPIVersion, Type: resourceSpec.Type, Scope: resourceSpec.Scope, ParentID: parentID, SpecHash: hash, SpecJSON: canonical, Lifecycle: resourceSpec.Lifecycle}
+		redactedCanonical, redactionErr := redactedResourceCanonicalJSON(resourceSpec)
+		if redactionErr != nil {
+			return result, redactionErr
+		}
+		state := DeclarativeResourceState{LogicalID: resourceSpec.ID, ResourceID: resource.ID, APIVersion: DeclarativeAPIVersion, Type: resourceSpec.Type, Scope: resourceSpec.Scope, ParentID: parentID, SpecHash: hash, SpecJSON: redactedCanonical, Lifecycle: resourceSpec.Lifecycle}
 		if err := engine.authority.SaveDeclarativeState(principal, state, requestID, correlationID); err != nil {
 			return result, err
 		}
