@@ -1,5 +1,0 @@
-{
-  "owner-token-example": {"principal":"REPLACE_WITH_EXTERNAL_TOKEN", "role":"owner", "scope":"*"},
-  "editor-token-example": {"principal":"REPLACE_WITH_EXTERNAL_TOKEN", "role":"editor", "scope":"*"},
-  "reader-token-example": {"principal":"REPLACE_WITH_EXTERNAL_TOKEN", "role":"reader", "scope":"*"}
-}
