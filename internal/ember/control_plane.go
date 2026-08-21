@@ -12,7 +12,6 @@ var (
 	ErrOperationNotFound = errors.New("operation not found")
 )
 
-// ControlPlane is the domain boundary implemented by resource providers.
 type ControlPlane interface {
 	CreateResource(ctx context.Context, spec models.ResourceSpec) (*models.Resource, *models.Operation, error)
 	GetResource(ctx context.Context, resourceID string) (*models.Resource, error)
