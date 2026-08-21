@@ -1,7 +1,6 @@
-package ember
+package models
 
 import (
-	"context"
 	"errors"
 	"testing"
 )
@@ -137,19 +136,3 @@ func TestOperationValidate(t *testing.T) {
 		})
 	}
 }
-
-type controlPlaneContract struct{}
-
-func (controlPlaneContract) CreateResource(context.Context, ResourceSpec) (*Resource, *Operation, error) {
-	return nil, nil, nil
-}
-
-func (controlPlaneContract) GetResource(context.Context, string) (*Resource, error) {
-	return nil, nil
-}
-
-func (controlPlaneContract) GetOperation(context.Context, string) (*Operation, error) {
-	return nil, nil
-}
-
-var _ ControlPlane = controlPlaneContract{}

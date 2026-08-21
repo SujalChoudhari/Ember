@@ -1,4 +1,4 @@
-package ember
+package models
 
 import (
 	"errors"
