@@ -25,6 +25,17 @@ func newMemoryResourceStore() *memoryResourceStore {
 	return &memoryResourceStore{resources: make(map[string]models.Resource)}
 }
 
+func cloneTags(tags map[string]string) map[string]string {
+	if tags == nil {
+		return nil
+	}
+	clone := make(map[string]string, len(tags))
+	for key, value := range tags {
+		clone[key] = value
+	}
+	return clone
+}
+
 func (store *memoryResourceStore) Create(ctx context.Context, spec models.ResourceSpec) (*models.Resource, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -58,10 +69,12 @@ func (store *memoryResourceStore) Create(ctx context.Context, spec models.Resour
 		Spec:          spec,
 		ObservedState: models.ResourceStateUnknown,
 	}
+	resource.Spec.Tags = cloneTags(spec.Tags)
 	if err := resource.Validate(); err != nil {
 		return nil, err
 	}
 	store.resources[resource.ID] = *resource
+	resource.Spec.Tags = cloneTags(resource.Spec.Tags)
 	return resource, nil
 }
 
@@ -81,6 +94,7 @@ func (store *memoryResourceStore) Get(ctx context.Context, scopeID, resourceID s
 		return nil, ErrResourceNotFound
 	}
 	copy := resource
+	copy.Spec.Tags = cloneTags(resource.Spec.Tags)
 	return &copy, nil
 }
 
@@ -106,6 +120,7 @@ func (store *memoryResourceStore) List(ctx context.Context, scopeID string, limi
 	resources := make([]models.Resource, 0, limit)
 	for _, resource := range store.resources {
 		if resource.Spec.ParentID == scopeID {
+			resource.Spec.Tags = cloneTags(resource.Spec.Tags)
 			resources = append(resources, resource)
 		}
 	}
@@ -116,6 +131,57 @@ func (store *memoryResourceStore) List(ctx context.Context, scopeID string, limi
 		resources = resources[:limit]
 	}
 	return resources, nil
+}
+
+func (store *memoryResourceStore) UpdateTags(ctx context.Context, scopeID, resourceID string, tags map[string]string) (*models.Resource, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateMemoryScope(scopeID); err != nil {
+		return nil, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	resource, ok := store.resources[resourceID]
+	if !ok || resource.Spec.ParentID != scopeID {
+		return nil, ErrResourceNotFound
+	}
+	updatedSpec := resource.Spec
+	updatedSpec.Tags = cloneTags(tags)
+	if err := updatedSpec.Validate(); err != nil {
+		return nil, err
+	}
+	updated := resource
+	updated.Spec = updatedSpec
+	store.resources[resourceID] = updated
+	updated.Spec.Tags = cloneTags(updated.Spec.Tags)
+	return &updated, nil
+}
+
+func (store *memoryResourceStore) Delete(ctx context.Context, scopeID, resourceID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateMemoryScope(scopeID); err != nil {
+		return err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	resource, ok := store.resources[resourceID]
+	if !ok || resource.Spec.ParentID != scopeID {
+		return ErrResourceNotFound
+	}
+	for _, child := range store.resources {
+		if child.Spec.ParentID == resourceID {
+			return ErrResourceHasDependents
+		}
+	}
+	delete(store.resources, resourceID)
+	return nil
 }
 
 func validateMemoryScope(scopeID string) error {
@@ -357,6 +423,241 @@ func TestResourceModelBoundsContract(t *testing.T) {
 		ObservedState: models.ResourceState(tooLong(models.MaxResourceStateLength)),
 	}).Validate(); !errors.Is(err, models.ErrInvalidResource) {
 		t.Fatalf("overlong observed state Validate() error = %v, want ErrInvalidResource", err)
+	}
+}
+
+func TestResourceStoreTagsUpdateAndSafeDeleteContract(t *testing.T) {
+	store := newMemoryResourceStore()
+	ctx := context.Background()
+	inputTags := map[string]string{"environment": "test"}
+	parent := createResource(t, store, models.ResourceSpec{
+		Type:         models.ResourceTypeGroup,
+		Name:         "parent",
+		Tags:         inputTags,
+		Provider:     providerMetadata(),
+		DesiredState: models.ResourceStateReady,
+	})
+	parent.Spec.Tags["environment"] = "returned-create-mutation"
+	inputTags["environment"] = "caller-mutated"
+
+	stored, err := store.Get(ctx, "", parent.ID)
+	if err != nil {
+		t.Fatalf("Get() after Create() error = %v", err)
+	}
+	if got := stored.Spec.Tags["environment"]; got != "test" {
+		t.Fatalf("stored tag = %q, want %q", got, "test")
+	}
+	stored.Spec.Tags["environment"] = "returned-get-mutation"
+	stored, err = store.Get(ctx, "", parent.ID)
+	if err != nil {
+		t.Fatalf("second Get() after returned-map mutation error = %v", err)
+	}
+	if got := stored.Spec.Tags["environment"]; got != "test" {
+		t.Fatalf("stored tag after returned Get() mutation = %q, want %q", got, "test")
+	}
+
+	sibling := createResource(t, store, models.ResourceSpec{
+		Type:         models.ResourceTypeGroup,
+		Name:         "sibling",
+		Provider:     providerMetadata(),
+		DesiredState: models.ResourceStateReady,
+	})
+	childSpec := resourceSpec(parent.ID, "child")
+	childSpec.Tags = map[string]string{"tier": "child"}
+	child := createResource(t, store, childSpec)
+
+	rootResources, err := store.List(ctx, "", MaxResourceListLimit)
+	if err != nil {
+		t.Fatalf("root List() error = %v", err)
+	}
+	foundParent := false
+	for index := range rootResources {
+		if rootResources[index].ID == parent.ID {
+			rootResources[index].Spec.Tags["environment"] = "returned-list-mutation"
+			foundParent = true
+		}
+	}
+	if !foundParent {
+		t.Fatalf("root List() did not return parent %q", parent.ID)
+	}
+	stored, err = store.Get(ctx, "", parent.ID)
+	if err != nil {
+		t.Fatalf("Get() after returned List() mutation error = %v", err)
+	}
+	if got := stored.Spec.Tags["environment"]; got != "test" {
+		t.Fatalf("stored tag after returned List() mutation = %q, want %q", got, "test")
+	}
+	childResources, err := store.List(ctx, parent.ID, MaxResourceListLimit)
+	if err != nil {
+		t.Fatalf("child List() error = %v", err)
+	}
+	if len(childResources) != 1 {
+		t.Fatalf("child List() length = %d, want 1", len(childResources))
+	}
+	childResources[0].Spec.Tags["tier"] = "returned-list-mutation"
+	storedChild, err := store.Get(ctx, parent.ID, child.ID)
+	if err != nil {
+		t.Fatalf("Get() child after returned List() mutation error = %v", err)
+	}
+	if got := storedChild.Spec.Tags["tier"]; got != "child" {
+		t.Fatalf("stored child tag after returned List() mutation = %q, want %q", got, "child")
+	}
+
+	if _, err := store.UpdateTags(ctx, sibling.ID, child.ID, map[string]string{"owner": "platform"}); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("sibling-scope UpdateTags() error = %v, want ErrResourceNotFound", err)
+	}
+	if err := store.Delete(ctx, sibling.ID, child.ID); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("sibling-scope Delete() error = %v, want ErrResourceNotFound", err)
+	}
+
+	updatedTags := map[string]string{"environment": "production", "owner": "platform"}
+	updated, err := store.UpdateTags(ctx, "", parent.ID, updatedTags)
+	if err != nil {
+		t.Fatalf("UpdateTags() error = %v", err)
+	}
+	if updated.ID != parent.ID {
+		t.Fatalf("UpdateTags() ID = %q, want immutable ID %q", updated.ID, parent.ID)
+	}
+	if updated.Spec.Type != parent.Spec.Type || updated.Spec.Name != parent.Spec.Name || updated.Spec.ParentID != parent.Spec.ParentID ||
+		updated.Spec.Provider != parent.Spec.Provider || updated.Spec.DesiredState != parent.Spec.DesiredState || updated.ObservedState != parent.ObservedState {
+		t.Fatalf("UpdateTags() changed immutable resource fields: %#v", updated)
+	}
+	if !reflect.DeepEqual(updated.Spec.Tags, updatedTags) {
+		t.Fatalf("UpdateTags() tags = %#v, want %#v", updated.Spec.Tags, updatedTags)
+	}
+	updated.Spec.Tags["environment"] = "returned-update-mutation"
+	updatedTags["environment"] = "caller-mutated"
+	stored, err = store.Get(ctx, "", parent.ID)
+	if err != nil {
+		t.Fatalf("Get() after UpdateTags() returned-map mutation error = %v", err)
+	}
+	if got := stored.Spec.Tags["environment"]; got != "production" {
+		t.Fatalf("stored tag after UpdateTags() caller/returned mutation = %q, want %q", got, "production")
+	}
+
+	if err := store.Delete(ctx, "", parent.ID); !errors.Is(err, ErrResourceHasDependents) {
+		t.Fatalf("Delete() with child error = %v, want ErrResourceHasDependents", err)
+	}
+	if _, err := store.Get(ctx, "", parent.ID); err != nil {
+		t.Fatalf("parent after refused Delete() error = %v", err)
+	}
+	if _, err := store.Get(ctx, parent.ID, child.ID); err != nil {
+		t.Fatalf("child after refused parent Delete() error = %v", err)
+	}
+
+	if err := store.Delete(ctx, parent.ID, child.ID); err != nil {
+		t.Fatalf("Delete() leaf error = %v", err)
+	}
+	if _, err := store.Get(ctx, parent.ID, child.ID); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("deleted child Get() error = %v, want ErrResourceNotFound", err)
+	}
+	if err := store.Delete(ctx, "", parent.ID); err != nil {
+		t.Fatalf("Delete() parent after child error = %v", err)
+	}
+	if _, err := store.Get(ctx, "", parent.ID); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("deleted parent Get() error = %v, want ErrResourceNotFound", err)
+	}
+	if err := store.Delete(ctx, "", sibling.ID); err != nil {
+		t.Fatalf("Delete() sibling after parent/child cleanup error = %v", err)
+	}
+	rootResources, err = store.List(ctx, "", MaxResourceListLimit)
+	if err != nil {
+		t.Fatalf("root List() after deletion error = %v", err)
+	}
+	if len(rootResources) != 0 {
+		t.Fatalf("root List() after deletion = %#v, want no residue", rootResources)
+	}
+}
+
+func TestResourceStoreMutationValidationContract(t *testing.T) {
+	store := newMemoryResourceStore()
+	ctx := context.Background()
+	spec := resourceSpec("", "mutable")
+	spec.Tags = map[string]string{"owner": "platform"}
+	resource := createResource(t, store, spec)
+
+	if _, err := store.UpdateTags(ctx, "", resource.ID, map[string]string{strings.Repeat("x", models.MaxResourceTagKeyLength+1): "value"}); !errors.Is(err, models.ErrInvalidResourceSpec) {
+		t.Fatalf("overlong UpdateTags() error = %v, want ErrInvalidResourceSpec", err)
+	}
+	stored, err := store.Get(ctx, "", resource.ID)
+	if err != nil {
+		t.Fatalf("Get() after invalid UpdateTags() error = %v", err)
+	}
+	if !reflect.DeepEqual(stored.Spec.Tags, spec.Tags) {
+		t.Fatalf("stored tags after invalid UpdateTags() = %#v, want %#v", stored.Spec.Tags, spec.Tags)
+	}
+	if _, err := store.UpdateTags(ctx, " 	", resource.ID, map[string]string{"owner": "platform"}); !errors.Is(err, ErrInvalidScope) {
+		t.Fatalf("blank-scope UpdateTags() error = %v, want ErrInvalidScope", err)
+	}
+	if _, err := store.UpdateTags(ctx, "missing-scope", resource.ID, map[string]string{"owner": "platform"}); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("cross-scope UpdateTags() error = %v, want ErrResourceNotFound", err)
+	}
+	if _, err := store.UpdateTags(ctx, "", "missing-resource", map[string]string{"owner": "platform"}); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("missing UpdateTags() error = %v, want ErrResourceNotFound", err)
+	}
+	if err := store.Delete(ctx, " 	", resource.ID); !errors.Is(err, ErrInvalidScope) {
+		t.Fatalf("blank-scope Delete() error = %v, want ErrInvalidScope", err)
+	}
+	if err := store.Delete(ctx, "missing-scope", resource.ID); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("cross-scope Delete() error = %v, want ErrResourceNotFound", err)
+	}
+}
+
+func TestResourceModelTagBoundsContract(t *testing.T) {
+	tooLong := func(length int) string { return strings.Repeat("x", length+1) }
+	boundaryTags := make(map[string]string, models.MaxResourceTagCount)
+	for index := 0; index < models.MaxResourceTagCount; index++ {
+		prefix := fmt.Sprintf("tag-%02d", index)
+		boundaryTags[prefix+strings.Repeat("k", models.MaxResourceTagKeyLength-len(prefix))] = strings.Repeat("v", models.MaxResourceTagValueLength)
+	}
+	if err := (models.ResourceSpec{
+		Type: models.ResourceTypeBucket,
+		Name: "bounded",
+		Tags: boundaryTags,
+	}).Validate(); err != nil {
+		t.Fatalf("exact-boundary tags Validate() error = %v, want nil", err)
+	}
+	if err := (models.ResourceSpec{
+		Type: models.ResourceTypeBucket,
+		Name: "bounded",
+		Tags: map[string]string{" 	": "value"},
+	}).Validate(); !errors.Is(err, models.ErrInvalidResourceSpec) {
+		t.Fatalf("blank tag key Validate() error = %v, want ErrInvalidResourceSpec", err)
+	}
+
+	tooMany := make(map[string]string, models.MaxResourceTagCount+1)
+	for index := 0; index <= models.MaxResourceTagCount; index++ {
+		tooMany[fmt.Sprintf("tag-%d", index)] = "value"
+	}
+
+	tests := []struct {
+		name string
+		tags map[string]string
+	}{
+		{
+			name: "overlong key",
+			tags: map[string]string{tooLong(models.MaxResourceTagKeyLength): "value"},
+		},
+		{
+			name: "overlong value",
+			tags: map[string]string{"key": tooLong(models.MaxResourceTagValueLength)},
+		},
+		{
+			name: "too many tags",
+			tags: tooMany,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := models.ResourceSpec{
+				Type: models.ResourceTypeBucket,
+				Name: "bounded",
+				Tags: tt.tags,
+			}
+			if err := spec.Validate(); !errors.Is(err, models.ErrInvalidResourceSpec) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidResourceSpec", err)
+			}
+		})
 	}
 }
 
