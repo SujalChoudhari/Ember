@@ -39,6 +39,11 @@ const (
 	ResourceStateDeleting ResourceState = "deleting"
 )
 
+type ResourceLock struct {
+	Owner string
+	Token string
+}
+
 const (
 	MaxResourceIDLength        = 128
 	MaxResourceNameLength      = 128
@@ -50,6 +55,8 @@ const (
 	MaxProviderTypeLength      = 128
 	MaxProviderVersionLength   = 32
 	MaxResourceStateLength     = 32
+	MaxResourceLockOwnerLength = 128
+	MaxResourceLockTokenLength = 128
 )
 
 func (metadata ProviderMetadata) valid() bool {
@@ -60,6 +67,14 @@ func (metadata ProviderMetadata) valid() bool {
 
 func validOptionalBoundedText(value string, maxLength int) bool {
 	return value == "" || (strings.TrimSpace(value) != "" && len(value) <= maxLength)
+}
+
+func (lock ResourceLock) Validate() error {
+	if strings.TrimSpace(lock.Owner) == "" || len(lock.Owner) > MaxResourceLockOwnerLength ||
+		strings.TrimSpace(lock.Token) == "" || len(lock.Token) > MaxResourceLockTokenLength {
+		return ErrInvalidResourceLock
+	}
+	return nil
 }
 
 func validTags(tags map[string]string) bool {
@@ -101,6 +116,7 @@ type Resource struct {
 var (
 	ErrInvalidResourceSpec = errors.New("invalid resource spec")
 	ErrInvalidResource     = errors.New("invalid resource")
+	ErrInvalidResourceLock = errors.New("invalid resource lock")
 )
 
 func (spec ResourceSpec) Validate() error {

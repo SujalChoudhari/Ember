@@ -18,11 +18,15 @@ const testListLimit = 2
 type memoryResourceStore struct {
 	mu        sync.RWMutex
 	resources map[string]models.Resource
+	locks     map[string]models.ResourceLock
 	nextID    uint64
 }
 
 func newMemoryResourceStore() *memoryResourceStore {
-	return &memoryResourceStore{resources: make(map[string]models.Resource)}
+	return &memoryResourceStore{
+		resources: make(map[string]models.Resource),
+		locks:     make(map[string]models.ResourceLock),
+	}
 }
 
 func cloneTags(tags map[string]string) map[string]string {
@@ -181,7 +185,87 @@ func (store *memoryResourceStore) Delete(ctx context.Context, scopeID, resourceI
 		}
 	}
 	delete(store.resources, resourceID)
+	delete(store.locks, resourceID)
 	return nil
+}
+
+func (store *memoryResourceStore) AcquireLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateMemoryScope(scopeID); err != nil {
+		return err
+	}
+	if err := lock.Validate(); err != nil {
+		return err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	resource, ok := store.resources[resourceID]
+	if !ok || resource.Spec.ParentID != scopeID {
+		return ErrResourceNotFound
+	}
+	if current, ok := store.locks[resourceID]; ok {
+		if current == lock {
+			return nil
+		}
+		return ErrResourceLockConflict
+	}
+	store.locks[resourceID] = lock
+	return nil
+}
+
+func (store *memoryResourceStore) ReleaseLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateMemoryScope(scopeID); err != nil {
+		return err
+	}
+	if err := lock.Validate(); err != nil {
+		return err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	resource, ok := store.resources[resourceID]
+	if !ok || resource.Spec.ParentID != scopeID {
+		return ErrResourceNotFound
+	}
+	current, ok := store.locks[resourceID]
+	if !ok {
+		return ErrResourceLockNotHeld
+	}
+	if current != lock {
+		return ErrResourceLockNotOwner
+	}
+	delete(store.locks, resourceID)
+	return nil
+}
+
+func (store *memoryResourceStore) InspectLock(ctx context.Context, scopeID, resourceID string) (*models.ResourceLock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateMemoryScope(scopeID); err != nil {
+		return nil, err
+	}
+
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	resource, ok := store.resources[resourceID]
+	if !ok || resource.Spec.ParentID != scopeID {
+		return nil, ErrResourceNotFound
+	}
+	lock, ok := store.locks[resourceID]
+	if !ok {
+		return nil, nil
+	}
+	return &lock, nil
 }
 
 func validateMemoryScope(scopeID string) error {
@@ -658,6 +742,144 @@ func TestResourceModelTagBoundsContract(t *testing.T) {
 				t.Fatalf("Validate() error = %v, want ErrInvalidResourceSpec", err)
 			}
 		})
+	}
+}
+
+func TestResourceStoreLockLifecycleContract(t *testing.T) {
+	store := newMemoryResourceStore()
+	ctx := context.Background()
+	parent := createResource(t, store, models.ResourceSpec{
+		Type:         models.ResourceTypeGroup,
+		Name:         "parent",
+		Provider:     providerMetadata(),
+		DesiredState: models.ResourceStateReady,
+	})
+	child := createResource(t, store, resourceSpec(parent.ID, "child"))
+	lock := models.ResourceLock{Owner: "controller-a", Token: "token-a"}
+	conflict := models.ResourceLock{Owner: "controller-b", Token: "token-b"}
+	wrongOwner := models.ResourceLock{Owner: "controller-b", Token: lock.Token}
+
+	unlocked, err := store.InspectLock(ctx, "", parent.ID)
+	if err != nil {
+		t.Fatalf("InspectLock() before acquisition error = %v", err)
+	}
+	if unlocked != nil {
+		t.Fatalf("InspectLock() before acquisition = %#v, want nil", unlocked)
+	}
+
+	if err := store.AcquireLock(ctx, "", parent.ID, lock); err != nil {
+		t.Fatalf("AcquireLock() error = %v", err)
+	}
+	inspected, err := store.InspectLock(ctx, "", parent.ID)
+	if err != nil {
+		t.Fatalf("InspectLock() after acquisition error = %v", err)
+	}
+	if inspected == nil || *inspected != lock {
+		t.Fatalf("InspectLock() after acquisition = %#v, want %#v", inspected, lock)
+	}
+
+	if err := store.AcquireLock(ctx, "", parent.ID, conflict); !errors.Is(err, ErrResourceLockConflict) {
+		t.Fatalf("conflicting AcquireLock() error = %v, want ErrResourceLockConflict", err)
+	}
+	inspected, err = store.InspectLock(ctx, "", parent.ID)
+	if err != nil {
+		t.Fatalf("InspectLock() after conflict error = %v", err)
+	}
+	if inspected == nil || *inspected != lock {
+		t.Fatalf("lock after conflict = %#v, want unchanged %#v", inspected, lock)
+	}
+	if err := store.AcquireLock(ctx, "", parent.ID, lock); err != nil {
+		t.Fatalf("idempotent AcquireLock() error = %v", err)
+	}
+
+	if err := store.ReleaseLock(ctx, "", parent.ID, wrongOwner); !errors.Is(err, ErrResourceLockNotOwner) {
+		t.Fatalf("non-owner ReleaseLock() error = %v, want ErrResourceLockNotOwner", err)
+	}
+	inspected, err = store.InspectLock(ctx, "", parent.ID)
+	if err != nil {
+		t.Fatalf("InspectLock() after refused release error = %v", err)
+	}
+	if inspected == nil || *inspected != lock {
+		t.Fatalf("lock after refused release = %#v, want unchanged %#v", inspected, lock)
+	}
+
+	if err := store.ReleaseLock(ctx, "", parent.ID, lock); err != nil {
+		t.Fatalf("ReleaseLock() error = %v", err)
+	}
+	unlocked, err = store.InspectLock(ctx, "", parent.ID)
+	if err != nil {
+		t.Fatalf("InspectLock() after release error = %v", err)
+	}
+	if unlocked != nil {
+		t.Fatalf("InspectLock() after release = %#v, want nil", unlocked)
+	}
+	if err := store.ReleaseLock(ctx, "", parent.ID, lock); !errors.Is(err, ErrResourceLockNotHeld) {
+		t.Fatalf("release without held lock error = %v, want ErrResourceLockNotHeld", err)
+	}
+	if err := store.AcquireLock(ctx, "", "missing-resource", lock); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("missing-resource AcquireLock() error = %v, want ErrResourceNotFound", err)
+	}
+	if err := store.ReleaseLock(ctx, "", "missing-resource", lock); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("missing-resource ReleaseLock() error = %v, want ErrResourceNotFound", err)
+	}
+	if _, err := store.InspectLock(ctx, "", "missing-resource"); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("missing-resource InspectLock() error = %v, want ErrResourceNotFound", err)
+	}
+
+	if err := store.AcquireLock(ctx, parent.ID, child.ID, lock); err != nil {
+		t.Fatalf("child AcquireLock() error = %v", err)
+	}
+	if _, err := store.InspectLock(ctx, "", child.ID); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("cross-scope InspectLock() error = %v, want ErrResourceNotFound", err)
+	}
+	if err := store.ReleaseLock(ctx, "", child.ID, lock); !errors.Is(err, ErrResourceNotFound) {
+		t.Fatalf("cross-scope ReleaseLock() error = %v, want ErrResourceNotFound", err)
+	}
+	if err := store.AcquireLock(ctx, " 	", parent.ID, lock); !errors.Is(err, ErrInvalidScope) {
+		t.Fatalf("blank-scope AcquireLock() error = %v, want ErrInvalidScope", err)
+	}
+	if _, err := store.InspectLock(ctx, " 	", parent.ID); !errors.Is(err, ErrInvalidScope) {
+		t.Fatalf("blank-scope InspectLock() error = %v, want ErrInvalidScope", err)
+	}
+}
+
+func TestResourceStoreLockInputValidationContract(t *testing.T) {
+	store := newMemoryResourceStore()
+	resource := createResource(t, store, resourceSpec("", "locked"))
+	invalidLocks := []models.ResourceLock{
+		{Owner: " 	", Token: "token"},
+		{Owner: "owner", Token: " "},
+		{Owner: strings.Repeat("o", models.MaxResourceLockOwnerLength+1), Token: "token"},
+		{Owner: "owner", Token: strings.Repeat("t", models.MaxResourceLockTokenLength+1)},
+	}
+	for index, lock := range invalidLocks {
+		if err := store.AcquireLock(context.Background(), "", resource.ID, lock); !errors.Is(err, models.ErrInvalidResourceLock) {
+			t.Errorf("invalid lock %d AcquireLock() error = %v, want models.ErrInvalidResourceLock", index, err)
+		}
+	}
+	boundary := models.ResourceLock{
+		Owner: strings.Repeat("o", models.MaxResourceLockOwnerLength),
+		Token: strings.Repeat("t", models.MaxResourceLockTokenLength),
+	}
+	if err := store.AcquireLock(context.Background(), "", resource.ID, boundary); err != nil {
+		t.Fatalf("exact-boundary AcquireLock() error = %v, want nil", err)
+	}
+	inspected, err := store.InspectLock(context.Background(), "", resource.ID)
+	if err != nil {
+		t.Fatalf("InspectLock() at exact boundary error = %v", err)
+	}
+	if inspected == nil || *inspected != boundary {
+		t.Fatalf("exact-boundary InspectLock() = %#v, want %#v", inspected, boundary)
+	}
+	if err := store.ReleaseLock(context.Background(), "", resource.ID, boundary); err != nil {
+		t.Fatalf("exact-boundary ReleaseLock() error = %v", err)
+	}
+	unlocked, err := store.InspectLock(context.Background(), "", resource.ID)
+	if err != nil {
+		t.Fatalf("InspectLock() after invalid input error = %v", err)
+	}
+	if unlocked != nil {
+		t.Fatalf("invalid acquisition mutated lock state: %#v", unlocked)
 	}
 }
 
