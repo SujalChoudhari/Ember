@@ -43,6 +43,9 @@ const (
 	MaxResourceIDLength        = 128
 	MaxResourceNameLength      = 128
 	MaxParentIDLength          = 128
+	MaxResourceTagCount        = 32
+	MaxResourceTagKeyLength    = 64
+	MaxResourceTagValueLength  = 256
 	MaxProviderNamespaceLength = 64
 	MaxProviderTypeLength      = 128
 	MaxProviderVersionLength   = 32
@@ -59,6 +62,18 @@ func validOptionalBoundedText(value string, maxLength int) bool {
 	return value == "" || (strings.TrimSpace(value) != "" && len(value) <= maxLength)
 }
 
+func validTags(tags map[string]string) bool {
+	if len(tags) > MaxResourceTagCount {
+		return false
+	}
+	for key, value := range tags {
+		if strings.TrimSpace(key) == "" || len(key) > MaxResourceTagKeyLength || len(value) > MaxResourceTagValueLength {
+			return false
+		}
+	}
+	return true
+}
+
 func (state ResourceState) valid() bool {
 	switch state {
 	case "", ResourceStateUnknown, ResourceStatePending, ResourceStateReady, ResourceStateFailed, ResourceStateDeleting:
@@ -72,6 +87,7 @@ type ResourceSpec struct {
 	Type         ResourceType
 	Name         string
 	ParentID     string
+	Tags         map[string]string
 	Provider     ProviderMetadata
 	DesiredState ResourceState
 }
@@ -94,7 +110,7 @@ func (spec ResourceSpec) Validate() error {
 	if spec.ParentID != "" && (strings.TrimSpace(spec.ParentID) == "" || len(spec.ParentID) > MaxParentIDLength) {
 		return ErrInvalidResourceSpec
 	}
-	if !spec.Provider.valid() || len(string(spec.DesiredState)) > MaxResourceStateLength || !spec.DesiredState.valid() {
+	if !validTags(spec.Tags) || !spec.Provider.valid() || len(string(spec.DesiredState)) > MaxResourceStateLength || !spec.DesiredState.valid() {
 		return ErrInvalidResourceSpec
 	}
 	return nil
