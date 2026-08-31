@@ -103,3 +103,79 @@ func TestResourceManagerExposesScopedResourceLifecycle(t *testing.T) {
 		t.Fatalf("ListResources(sibling scope) IDs = %v, want %v", gotIDs, []string{childB.ID})
 	}
 }
+
+func TestResourceManagerExposesLifecycleAndLockOperations(t *testing.T) {
+	store, err := persistence.NewFileResourceStore(filepath.Join(t.TempDir(), "resources.json"))
+	if err != nil {
+		t.Fatalf("NewFileResourceStore() error = %v", err)
+	}
+	manager, err := NewResourceManager(store)
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	var plane ResourceControlPlane = manager
+	ctx := context.Background()
+
+	root, err := plane.CreateResource(ctx, models.ResourceSpec{
+		Type:         models.ResourceTypeGroup,
+		Name:         "root",
+		Provider:     models.ProviderMetadata{Namespace: "Ember.Storage", Type: "groups", Version: "v1"},
+		DesiredState: models.ResourceStateReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	child, err := plane.CreateResource(ctx, models.ResourceSpec{
+		Type:         models.ResourceTypeBucket,
+		Name:         "child",
+		ParentID:     root.ID,
+		Provider:     models.ProviderMetadata{Namespace: "Ember.Storage", Type: "buckets", Version: "v1"},
+		DesiredState: models.ResourceStateReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(child) error = %v", err)
+	}
+
+	updated, err := plane.UpdateResourceTags(ctx, root.ID, child.ID, map[string]string{"tier": "test"})
+	if err != nil {
+		t.Fatalf("UpdateResourceTags() error = %v", err)
+	}
+	if updated.ID != child.ID || !reflect.DeepEqual(updated.Spec.Tags, map[string]string{"tier": "test"}) {
+		t.Fatalf("UpdateResourceTags() = %#v, want child with updated tags", updated)
+	}
+
+	if err := plane.DeleteResource(ctx, "", root.ID); !errors.Is(err, persistence.ErrResourceHasDependents) {
+		t.Fatalf("DeleteResource(parent with child) error = %v, want ErrResourceHasDependents", err)
+	}
+
+	lock := models.ResourceLock{Owner: "manager-test", Token: "token-1"}
+	if err := plane.AcquireResourceLock(ctx, "", root.ID, lock); err != nil {
+		t.Fatalf("AcquireResourceLock() error = %v", err)
+	}
+	inspected, err := plane.InspectResourceLock(ctx, "", root.ID)
+	if err != nil {
+		t.Fatalf("InspectResourceLock() error = %v", err)
+	}
+	if inspected == nil || *inspected != lock {
+		t.Fatalf("InspectResourceLock() = %#v, want %#v", inspected, lock)
+	}
+	if err := plane.AcquireResourceLock(ctx, "", root.ID, models.ResourceLock{Owner: "other", Token: "token-2"}); !errors.Is(err, persistence.ErrResourceLockConflict) {
+		t.Fatalf("conflicting AcquireResourceLock() error = %v, want ErrResourceLockConflict", err)
+	}
+	if _, err := plane.UpdateResourceTags(ctx, root.ID, child.ID, map[string]string{"tier": "blocked"}); !errors.Is(err, persistence.ErrResourceLocked) {
+		t.Fatalf("inherited UpdateResourceTags() error = %v, want ErrResourceLocked", err)
+	}
+	if err := plane.DeleteResource(ctx, root.ID, child.ID); !errors.Is(err, persistence.ErrResourceLocked) {
+		t.Fatalf("inherited DeleteResource() error = %v, want ErrResourceLocked", err)
+	}
+
+	if err := plane.ReleaseResourceLock(ctx, "", root.ID, lock); err != nil {
+		t.Fatalf("ReleaseResourceLock() error = %v", err)
+	}
+	if err := plane.DeleteResource(ctx, root.ID, child.ID); err != nil {
+		t.Fatalf("DeleteResource(child) after release error = %v", err)
+	}
+	if err := plane.DeleteResource(ctx, "", root.ID); err != nil {
+		t.Fatalf("DeleteResource(root) after child cleanup error = %v", err)
+	}
+}
