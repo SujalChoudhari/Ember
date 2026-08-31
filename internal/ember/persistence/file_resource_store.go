@@ -231,6 +231,9 @@ func (store *FileResourceStore) Create(ctx context.Context, spec models.Resource
 			return nil, ErrResourceNotFound
 		}
 	}
+	if resourceHasReadOnlyLock(store.resources, store.locks, spec.ParentID) {
+		return nil, ErrResourceLocked
+	}
 	for _, resource := range store.resources {
 		if resource.Spec.ParentID == spec.ParentID &&
 			resource.Spec.Type == spec.Type &&
@@ -339,6 +342,9 @@ func (store *FileResourceStore) UpdateTags(ctx context.Context, scopeID, resourc
 	if !exists || resource.Spec.ParentID != scopeID {
 		return nil, ErrResourceNotFound
 	}
+	if resourceHasReadOnlyLock(store.resources, store.locks, resourceID) {
+		return nil, ErrResourceLocked
+	}
 	updated := resource
 	updated.Spec.Tags = cloneStoredTags(tags)
 	if err := updated.Spec.Validate(); err != nil {
@@ -367,6 +373,9 @@ func (store *FileResourceStore) Delete(ctx context.Context, scopeID, resourceID 
 	resource, exists := store.resources[resourceID]
 	if !exists || resource.Spec.ParentID != scopeID {
 		return ErrResourceNotFound
+	}
+	if resourceHasReadOnlyLock(store.resources, store.locks, resourceID) {
+		return ErrResourceLocked
 	}
 	for _, child := range store.resources {
 		if child.Spec.ParentID == resourceID {
