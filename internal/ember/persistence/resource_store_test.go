@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -58,6 +59,9 @@ func (store *memoryResourceStore) Create(ctx context.Context, spec models.Resour
 		if _, ok := store.resources[spec.ParentID]; !ok {
 			return nil, ErrResourceNotFound
 		}
+	}
+	if resourceHasReadOnlyLock(store.resources, store.locks, spec.ParentID) {
+		return nil, ErrResourceLocked
 	}
 	for _, resource := range store.resources {
 		if resource.Spec.ParentID == spec.ParentID &&
@@ -152,6 +156,9 @@ func (store *memoryResourceStore) UpdateTags(ctx context.Context, scopeID, resou
 	if !ok || resource.Spec.ParentID != scopeID {
 		return nil, ErrResourceNotFound
 	}
+	if resourceHasReadOnlyLock(store.resources, store.locks, resourceID) {
+		return nil, ErrResourceLocked
+	}
 	updatedSpec := resource.Spec
 	updatedSpec.Tags = cloneTags(tags)
 	if err := updatedSpec.Validate(); err != nil {
@@ -178,6 +185,9 @@ func (store *memoryResourceStore) Delete(ctx context.Context, scopeID, resourceI
 	resource, ok := store.resources[resourceID]
 	if !ok || resource.Spec.ParentID != scopeID {
 		return ErrResourceNotFound
+	}
+	if resourceHasReadOnlyLock(store.resources, store.locks, resourceID) {
+		return ErrResourceLocked
 	}
 	for _, child := range store.resources {
 		if child.Spec.ParentID == resourceID {
@@ -880,6 +890,124 @@ func TestResourceStoreLockInputValidationContract(t *testing.T) {
 	}
 	if unlocked != nil {
 		t.Fatalf("invalid acquisition mutated lock state: %#v", unlocked)
+	}
+}
+
+func TestResourceReadOnlyLockAncestryCycleFailsClosed(t *testing.T) {
+	resources := map[string]models.Resource{
+		"resource-a": {
+			ID: "resource-a",
+			Spec: models.ResourceSpec{
+				Type:     models.ResourceTypeGroup,
+				Name:     "a",
+				ParentID: "resource-b",
+			},
+		},
+		"resource-b": {
+			ID: "resource-b",
+			Spec: models.ResourceSpec{
+				Type:     models.ResourceTypeGroup,
+				Name:     "b",
+				ParentID: "resource-a",
+			},
+		},
+	}
+	if !resourceHasReadOnlyLock(resources, map[string]models.ResourceLock{}, "resource-a") {
+		t.Fatal("resourceHasReadOnlyLock() returned false for a cyclic ancestry")
+	}
+}
+
+func TestReadOnlyLockBlocksResourceMutations(t *testing.T) {
+	tests := []struct {
+		name     string
+		newStore func(t *testing.T) ResourceStore
+	}{
+		{
+			name: "memory",
+			newStore: func(*testing.T) ResourceStore {
+				return newMemoryResourceStore()
+			},
+		},
+		{
+			name: "file",
+			newStore: func(t *testing.T) ResourceStore {
+				store, err := NewFileResourceStore(filepath.Join(t.TempDir(), "resources.json"))
+				if err != nil {
+					t.Fatalf("NewFileResourceStore() error = %v", err)
+				}
+				return store
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := tt.newStore(t)
+			parent := createResource(t, store, resourceSpec("", "parent"))
+			lock := models.ResourceLock{Owner: "controller-a", Token: "token-a"}
+			if err := store.AcquireLock(ctx, "", parent.ID, lock); err != nil {
+				t.Fatalf("AcquireLock(parent) error = %v", err)
+			}
+
+			if _, err := store.Create(ctx, resourceSpec(parent.ID, "child")); !errors.Is(err, ErrResourceLocked) {
+				t.Fatalf("Create(child under locked parent) error = %v, want ErrResourceLocked", err)
+			}
+			if err := store.ReleaseLock(ctx, "", parent.ID, lock); err != nil {
+				t.Fatalf("ReleaseLock(parent) error = %v", err)
+			}
+			child := createResource(t, store, resourceSpec(parent.ID, "child"))
+			if child.ID != "resource-00000002" {
+				t.Fatalf("child ID after blocked Create() = %q, want resource-00000002", child.ID)
+			}
+
+			if err := store.AcquireLock(ctx, "", parent.ID, lock); err != nil {
+				t.Fatalf("AcquireLock(parent, inherited) error = %v", err)
+			}
+			if _, err := store.UpdateTags(ctx, parent.ID, child.ID, map[string]string{"environment": "blocked"}); !errors.Is(err, ErrResourceLocked) {
+				t.Fatalf("inherited UpdateTags() error = %v, want ErrResourceLocked", err)
+			}
+			if err := store.Delete(ctx, parent.ID, child.ID); !errors.Is(err, ErrResourceLocked) {
+				t.Fatalf("inherited Delete() error = %v, want ErrResourceLocked", err)
+			}
+			if err := store.ReleaseLock(ctx, "", parent.ID, lock); err != nil {
+				t.Fatalf("ReleaseLock(parent, inherited) error = %v", err)
+			}
+
+			if err := store.AcquireLock(ctx, parent.ID, child.ID, lock); err != nil {
+				t.Fatalf("AcquireLock(child) error = %v", err)
+			}
+			if _, err := store.UpdateTags(ctx, parent.ID, child.ID, map[string]string{"environment": "blocked"}); !errors.Is(err, ErrResourceLocked) {
+				t.Fatalf("direct UpdateTags() error = %v, want ErrResourceLocked", err)
+			}
+			got, err := store.Get(ctx, parent.ID, child.ID)
+			if err != nil {
+				t.Fatalf("Get() after blocked UpdateTags() error = %v", err)
+			}
+			if len(got.Spec.Tags) != 0 {
+				t.Fatalf("tags after blocked UpdateTags() = %#v, want unchanged", got.Spec.Tags)
+			}
+
+			if err := store.Delete(ctx, parent.ID, child.ID); !errors.Is(err, ErrResourceLocked) {
+				t.Fatalf("direct Delete() error = %v, want ErrResourceLocked", err)
+			}
+			if _, err := store.Get(ctx, parent.ID, child.ID); err != nil {
+				t.Fatalf("Get() after blocked Delete() error = %v", err)
+			}
+
+			if err := store.ReleaseLock(ctx, parent.ID, child.ID, lock); err != nil {
+				t.Fatalf("ReleaseLock(child) error = %v", err)
+			}
+			if _, err := store.UpdateTags(ctx, parent.ID, child.ID, map[string]string{"environment": "unlocked"}); err != nil {
+				t.Fatalf("UpdateTags() after ReleaseLock() error = %v", err)
+			}
+			if err := store.Delete(ctx, parent.ID, child.ID); err != nil {
+				t.Fatalf("Delete() after ReleaseLock() error = %v", err)
+			}
+			if err := store.Delete(ctx, "", parent.ID); err != nil {
+				t.Fatalf("Delete(parent) after child cleanup error = %v", err)
+			}
+		})
 	}
 }
 
