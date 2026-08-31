@@ -16,6 +16,11 @@ type ResourceControlPlane interface {
 	CreateResource(ctx context.Context, spec models.ResourceSpec) (*models.Resource, error)
 	GetResource(ctx context.Context, scopeID, resourceID string) (*models.Resource, error)
 	ListResources(ctx context.Context, scopeID string, limit int) ([]models.Resource, error)
+	UpdateResourceTags(ctx context.Context, scopeID, resourceID string, tags map[string]string) (*models.Resource, error)
+	DeleteResource(ctx context.Context, scopeID, resourceID string) error
+	AcquireResourceLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error
+	ReleaseResourceLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error
+	InspectResourceLock(ctx context.Context, scopeID, resourceID string) (*models.ResourceLock, error)
 }
 
 // ResourceManager delegates scoped resource operations to the approved store
@@ -41,6 +46,26 @@ func (manager *ResourceManager) GetResource(ctx context.Context, scopeID, resour
 
 func (manager *ResourceManager) ListResources(ctx context.Context, scopeID string, limit int) ([]models.Resource, error) {
 	return manager.store.List(ctx, scopeID, limit)
+}
+
+func (manager *ResourceManager) UpdateResourceTags(ctx context.Context, scopeID, resourceID string, tags map[string]string) (*models.Resource, error) {
+	return manager.store.UpdateTags(ctx, scopeID, resourceID, tags)
+}
+
+func (manager *ResourceManager) DeleteResource(ctx context.Context, scopeID, resourceID string) error {
+	return manager.store.Delete(ctx, scopeID, resourceID)
+}
+
+func (manager *ResourceManager) AcquireResourceLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error {
+	return manager.store.AcquireLock(ctx, scopeID, resourceID, lock)
+}
+
+func (manager *ResourceManager) ReleaseResourceLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error {
+	return manager.store.ReleaseLock(ctx, scopeID, resourceID, lock)
+}
+
+func (manager *ResourceManager) InspectResourceLock(ctx context.Context, scopeID, resourceID string) (*models.ResourceLock, error) {
+	return manager.store.InspectLock(ctx, scopeID, resourceID)
 }
 
 var _ ResourceControlPlane = (*ResourceManager)(nil)
