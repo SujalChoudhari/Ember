@@ -38,12 +38,14 @@ type Operator struct {
 }
 
 type OperatorResponse struct {
-	Resource  *models.Resource    `json:"resource,omitempty"`
-	Object    *models.BlobObject  `json:"object,omitempty"`
-	Content   []byte              `json:"content,omitempty"`
-	Operation *models.Operation   `json:"operation,omitempty"`
-	Audit     []models.AuditEntry `json:"audit,omitempty"`
-	Replayed  bool                `json:"replayed,omitempty"`
+	Resource  *models.Resource     `json:"resource,omitempty"`
+	Resources []models.Resource    `json:"resources,omitempty"`
+	Lock      *models.ResourceLock `json:"lock,omitempty"`
+	Object    *models.BlobObject   `json:"object,omitempty"`
+	Content   []byte               `json:"content,omitempty"`
+	Operation *models.Operation    `json:"operation,omitempty"`
+	Audit     []models.AuditEntry  `json:"audit,omitempty"`
+	Replayed  bool                 `json:"replayed,omitempty"`
 }
 
 func NewOperator(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error) (*Operator, error) {
@@ -130,6 +132,17 @@ func (operator *Operator) GetResource(ctx context.Context, principal OperatorPri
 	return resource, err
 }
 
+func (operator *Operator) ListResources(ctx context.Context, principal OperatorPrincipal, limit int) ([]models.Resource, error) {
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	resources, err := operator.resources.ListResources(ctx, principal.ScopeID, limit)
+	if errors.Is(err, persistence.ErrResourceNotFound) && principal.ScopeID != "" {
+		return nil, ErrOperatorScopeDenied
+	}
+	return resources, err
+}
+
 func (operator *Operator) authorizeResource(ctx context.Context, principal OperatorPrincipal, resourceID string) (*models.Resource, string, error) {
 	if err := principal.validate(); err != nil {
 		return nil, "", err
@@ -142,9 +155,45 @@ func (operator *Operator) authorizeResource(ctx context.Context, principal Opera
 	return resource, scopeID, err
 }
 
+func (operator *Operator) ensureResourceUnlocked(ctx context.Context, principal OperatorPrincipal, resource *models.Resource, scopeID string) error {
+	visited := make(map[string]struct{})
+	for resource != nil {
+		if _, seen := visited[resource.ID]; seen {
+			return persistence.ErrResourceLocked
+		}
+		visited[resource.ID] = struct{}{}
+
+		lock, err := operator.resources.InspectResourceLock(ctx, scopeID, resource.ID)
+		if err != nil {
+			return err
+		}
+		if lock != nil {
+			return persistence.ErrResourceLocked
+		}
+		if resource.Spec.ParentID == "" {
+			return nil
+		}
+
+		parentID := resource.Spec.ParentID
+		parentScope := operator.resourceLookupScope(principal, parentID)
+		resource, err = operator.resources.GetResource(ctx, parentScope, parentID)
+		if errors.Is(err, persistence.ErrResourceNotFound) && principal.ScopeID != "" {
+			return ErrOperatorScopeDenied
+		}
+		if err != nil {
+			return err
+		}
+		scopeID = parentScope
+	}
+	return nil
+}
+
 func (operator *Operator) UpdateResourceTags(ctx context.Context, principal OperatorPrincipal, resourceID string, tags map[string]string, requestID, correlationID string) (*OperatorResponse, error) {
-	_, scopeID, err := operator.authorizeResource(ctx, principal, resourceID)
+	resource, scopeID, err := operator.authorizeResource(ctx, principal, resourceID)
 	if err != nil {
+		return nil, err
+	}
+	if err := operator.ensureResourceUnlocked(ctx, principal, resource, scopeID); err != nil {
 		return nil, err
 	}
 
@@ -163,6 +212,13 @@ func (operator *Operator) UpdateResourceTags(ctx context.Context, principal Oper
 	if err != nil && result == nil {
 		return nil, err
 	}
+	if err != nil {
+		response := &OperatorResponse{
+			Operation: &result.Operation,
+			Replayed:  result.Replayed,
+		}
+		return response, err
+	}
 	if result == nil {
 		return nil, ErrOperatorResetUnavailable
 	}
@@ -178,6 +234,38 @@ func (operator *Operator) UpdateResourceTags(ctx context.Context, principal Oper
 		Replayed:  result.Replayed,
 	}
 	return response, err
+}
+
+func (operator *Operator) DeleteResource(ctx context.Context, principal OperatorPrincipal, resourceID string) error {
+	_, scopeID, err := operator.authorizeResource(ctx, principal, resourceID)
+	if err != nil {
+		return err
+	}
+	return operator.resources.DeleteResource(ctx, scopeID, resourceID)
+}
+
+func (operator *Operator) AcquireResourceLock(ctx context.Context, principal OperatorPrincipal, resourceID string, lock models.ResourceLock) error {
+	_, scopeID, err := operator.authorizeResource(ctx, principal, resourceID)
+	if err != nil {
+		return err
+	}
+	return operator.resources.AcquireResourceLock(ctx, scopeID, resourceID, lock)
+}
+
+func (operator *Operator) ReleaseResourceLock(ctx context.Context, principal OperatorPrincipal, resourceID string, lock models.ResourceLock) error {
+	_, scopeID, err := operator.authorizeResource(ctx, principal, resourceID)
+	if err != nil {
+		return err
+	}
+	return operator.resources.ReleaseResourceLock(ctx, scopeID, resourceID, lock)
+}
+
+func (operator *Operator) InspectResourceLock(ctx context.Context, principal OperatorPrincipal, resourceID string) (*models.ResourceLock, error) {
+	_, scopeID, err := operator.authorizeResource(ctx, principal, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	return operator.resources.InspectResourceLock(ctx, scopeID, resourceID)
 }
 
 func (operator *Operator) GetOperation(ctx context.Context, principal OperatorPrincipal, operationID string) (*models.Operation, error) {

@@ -33,8 +33,26 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 			return runCLICreateResource(ctx, operator, args[2:], output)
 		case "get":
 			return runCLIGetResource(ctx, operator, args[2:], output)
+		case "list":
+			return runCLIListResources(ctx, operator, args[2:], output)
 		case "update-tags":
 			return runCLIUpdateResourceTags(ctx, operator, args[2:], output)
+		case "delete":
+			return runCLIDeleteResource(ctx, operator, args[2:], output)
+		case "lock":
+			if len(args) < 3 {
+				return ErrInvalidCLIRequest
+			}
+			switch args[2] {
+			case "acquire":
+				return runCLIAcquireResourceLock(ctx, operator, args[3:], output)
+			case "release":
+				return runCLIReleaseResourceLock(ctx, operator, args[3:], output)
+			case "inspect":
+				return runCLIInspectResourceLock(ctx, operator, args[3:], output)
+			default:
+				return ErrInvalidCLIRequest
+			}
 		default:
 			return ErrInvalidCLIRequest
 		}
@@ -127,6 +145,93 @@ func runCLIGetResource(ctx context.Context, operator *Operator, args []string, o
 		return err
 	}
 	return writeCLIResponse(output, &OperatorResponse{Resource: resource})
+}
+
+func runCLIListResources(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("resource list")
+	scopeID := set.String("scope", "", "operator scope")
+	limit := set.Int("limit", persistence.MaxResourceListLimit, "maximum resources")
+	if err := set.Parse(args); err != nil {
+		return ErrInvalidCLIRequest
+	}
+	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	resources, err := operator.ListResources(ctx, OperatorPrincipal{ScopeID: *scopeID}, *limit)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Resources: resources})
+}
+
+func runCLIDeleteResource(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("resource delete")
+	scopeID := set.String("scope", "", "operator scope")
+	resourceID := set.String("id", "", "resource ID")
+	if err := set.Parse(args); err != nil {
+		return ErrInvalidCLIRequest
+	}
+	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	if err := operator.DeleteResource(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID); err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{})
+}
+
+func runCLIAcquireResourceLock(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("resource lock acquire")
+	scopeID := set.String("scope", "", "operator scope")
+	resourceID := set.String("id", "", "resource ID")
+	owner := set.String("owner", "", "lock owner")
+	token := set.String("token", "", "lock token")
+	if err := set.Parse(args); err != nil {
+		return ErrInvalidCLIRequest
+	}
+	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	lock := models.ResourceLock{Owner: *owner, Token: *token}
+	if err := operator.AcquireResourceLock(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, lock); err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Lock: &lock})
+}
+
+func runCLIReleaseResourceLock(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("resource lock release")
+	scopeID := set.String("scope", "", "operator scope")
+	resourceID := set.String("id", "", "resource ID")
+	owner := set.String("owner", "", "lock owner")
+	token := set.String("token", "", "lock token")
+	if err := set.Parse(args); err != nil {
+		return ErrInvalidCLIRequest
+	}
+	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	if err := operator.ReleaseResourceLock(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, models.ResourceLock{Owner: *owner, Token: *token}); err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{})
+}
+
+func runCLIInspectResourceLock(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("resource lock inspect")
+	scopeID := set.String("scope", "", "operator scope")
+	resourceID := set.String("id", "", "resource ID")
+	if err := set.Parse(args); err != nil {
+		return ErrInvalidCLIRequest
+	}
+	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	lock, err := operator.InspectResourceLock(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Lock: lock})
 }
 
 func runCLIUpdateResourceTags(ctx context.Context, operator *Operator, args []string, output io.Writer) error {

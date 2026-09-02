@@ -49,6 +49,11 @@ type resourceTagsRequest struct {
 	CorrelationID string            `json:"correlationId"`
 }
 
+type resourceLockRequest struct {
+	Owner string `json:"owner"`
+	Token string `json:"token"`
+}
+
 func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if handler.operator == nil {
 		writeOperatorError(writer, http.StatusInternalServerError, ErrInvalidOperator)
@@ -59,8 +64,11 @@ func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, reques
 		case http.MethodPost:
 			handler.createResource(writer, request)
 			return
+		case http.MethodGet:
+			handler.listResources(writer, request)
+			return
 		default:
-			writer.Header().Set("Allow", http.MethodPost)
+			writer.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
 			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 			return
 		}
@@ -124,6 +132,20 @@ func (handler *operatorHTTPHandler) createResource(writer http.ResponseWriter, r
 	writeOperatorJSON(writer, http.StatusCreated, &OperatorResponse{Resource: resource})
 }
 
+func (handler *operatorHTTPHandler) listResources(writer http.ResponseWriter, request *http.Request) {
+	limit, err := queryLimit(request, persistence.MaxResourceListLimit)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	resources, err := handler.operator.ListResources(request.Context(), operatorPrincipal(request), limit)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Resources: resources})
+}
+
 func resourceIDFromPath(path string) (string, error) {
 	encoded := strings.TrimPrefix(path, "/v1/resources/")
 	if encoded == "" || strings.Contains(encoded, "/") {
@@ -164,8 +186,17 @@ func resourceSubpathFromPath(path string) (string, string, error) {
 }
 
 func (handler *operatorHTTPHandler) resourceSubpath(writer http.ResponseWriter, request *http.Request) {
-	if request.Method == http.MethodGet && !strings.HasSuffix(request.URL.Path, "/audit") {
-		handler.getResource(writer, request)
+	rest := strings.TrimPrefix(request.URL.Path, "/v1/resources/")
+	if !strings.Contains(rest, "/") {
+		switch request.Method {
+		case http.MethodGet:
+			handler.getResource(writer, request)
+		case http.MethodDelete:
+			handler.deleteResource(writer, request)
+		default:
+			writer.Header().Set("Allow", http.MethodGet+", "+http.MethodDelete)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		}
 		return
 	}
 	resourceID, suffix, err := resourceSubpathFromPath(request.URL.Path)
@@ -188,6 +219,8 @@ func (handler *operatorHTTPHandler) resourceSubpath(writer http.ResponseWriter, 
 			return
 		}
 		handler.listAuditHistory(writer, request, resourceID)
+	case "lock":
+		handler.resourceLock(writer, request, resourceID)
 	default:
 		http.NotFound(writer, request)
 	}
@@ -205,6 +238,58 @@ func (handler *operatorHTTPHandler) updateResourceTags(writer http.ResponseWrite
 		return
 	}
 	writeOperatorJSON(writer, http.StatusOK, response)
+}
+
+func (handler *operatorHTTPHandler) deleteResource(writer http.ResponseWriter, request *http.Request) {
+	resourceID, err := resourceIDFromPath(request.URL.Path)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	if err := handler.operator.DeleteResource(request.Context(), operatorPrincipal(request), resourceID); err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *operatorHTTPHandler) resourceLock(writer http.ResponseWriter, request *http.Request, resourceID string) {
+	principal := operatorPrincipal(request)
+	switch request.Method {
+	case http.MethodGet:
+		lock, err := handler.operator.InspectResourceLock(request.Context(), principal, resourceID)
+		if err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Lock: lock})
+	case http.MethodPut:
+		var body resourceLockRequest
+		if err := decodeOperatorJSON(writer, request, &body); err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		lock := models.ResourceLock{Owner: body.Owner, Token: body.Token}
+		if err := handler.operator.AcquireResourceLock(request.Context(), principal, resourceID, lock); err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Lock: &lock})
+	case http.MethodDelete:
+		var body resourceLockRequest
+		if err := decodeOperatorJSON(writer, request, &body); err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		if err := handler.operator.ReleaseResourceLock(request.Context(), principal, resourceID, models.ResourceLock{Owner: body.Owner, Token: body.Token}); err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	default:
+		writer.Header().Set("Allow", http.MethodGet+", "+http.MethodPut+", "+http.MethodDelete)
+		writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+	}
 }
 
 func operationIDFromPath(path string) (string, error) {
@@ -344,10 +429,10 @@ func operatorErrorStatus(err error) int {
 	if errors.Is(err, persistence.ErrResourceNotFound) || errors.Is(err, persistence.ErrOperationNotFound) || errors.Is(err, persistence.ErrBlobObjectNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, persistence.ErrResourceLockConflict) || errors.Is(err, persistence.ErrResourceLocked) || errors.Is(err, persistence.ErrResourceHasDependents) || errors.Is(err, persistence.ErrOperationRequestConflict) {
+	if errors.Is(err, persistence.ErrResourceLockConflict) || errors.Is(err, persistence.ErrResourceLockNotHeld) || errors.Is(err, persistence.ErrResourceLockNotOwner) || errors.Is(err, persistence.ErrResourceLocked) || errors.Is(err, persistence.ErrResourceHasDependents) || errors.Is(err, persistence.ErrOperationRequestConflict) {
 		return http.StatusConflict
 	}
-	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) {
+	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) {
 		return http.StatusBadRequest
 	}
 	if errors.Is(err, persistence.ErrBlobObjectTooLarge) || errors.Is(err, persistence.ErrBlobQuotaExceeded) {

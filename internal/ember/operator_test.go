@@ -249,3 +249,129 @@ func TestFileOperatorResetsOwnedStateAndReopensDeterministically(t *testing.T) {
 		t.Fatalf("first resource ID after reset = %q, want resource-00000001", newGroup.ID)
 	}
 }
+
+func TestOperatorExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
+	ctx := context.Background()
+	operator := newTestOperator(t)
+
+	root, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "root"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	other, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "other"})
+	if err != nil {
+		t.Fatalf("CreateResource(other) error = %v", err)
+	}
+	child, err := operator.CreateResource(ctx, OperatorPrincipal{ScopeID: root.ID}, models.ResourceSpec{
+		Type: models.ResourceTypeBucket, Name: "assets", ParentID: root.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(child) error = %v", err)
+	}
+
+	rootResources, err := operator.ListResources(ctx, OperatorPrincipal{}, persistence.MaxResourceListLimit)
+	if err != nil {
+		t.Fatalf("ListResources(root) error = %v", err)
+	}
+	if len(rootResources) != 2 || rootResources[0].ID != root.ID || rootResources[1].ID != other.ID {
+		t.Fatalf("ListResources(root) = %#v, want deterministic root resources", rootResources)
+	}
+	childResources, err := operator.ListResources(ctx, OperatorPrincipal{ScopeID: root.ID}, persistence.MaxResourceListLimit)
+	if err != nil {
+		t.Fatalf("ListResources(child scope) error = %v", err)
+	}
+	if len(childResources) != 1 || childResources[0].ID != child.ID {
+		t.Fatalf("ListResources(child scope) = %#v, want child resource", childResources)
+	}
+
+	updated, err := operator.UpdateResourceTags(ctx, OperatorPrincipal{ScopeID: root.ID}, child.ID, map[string]string{"tier": "test"}, "request-tags", "correlation-tags")
+	if err != nil {
+		t.Fatalf("UpdateResourceTags() error = %v", err)
+	}
+	if updated.Resource == nil || updated.Resource.ID != child.ID || updated.Resource.Spec.Tags["tier"] != "test" {
+		t.Fatalf("UpdateResourceTags() = %#v, want immutable identity and updated tags", updated)
+	}
+
+	if err := operator.DeleteResource(ctx, OperatorPrincipal{}, root.ID); !errors.Is(err, persistence.ErrResourceHasDependents) {
+		t.Fatalf("DeleteResource(root with child) error = %v, want dependent refusal", err)
+	}
+
+	lock := models.ResourceLock{Owner: "operator", Token: "lock-token"}
+	if err := operator.AcquireResourceLock(ctx, OperatorPrincipal{}, root.ID, lock); err != nil {
+		t.Fatalf("AcquireResourceLock() error = %v", err)
+	}
+	inspected, err := operator.InspectResourceLock(ctx, OperatorPrincipal{}, root.ID)
+	if err != nil {
+		t.Fatalf("InspectResourceLock() error = %v", err)
+	}
+	if inspected == nil || *inspected != lock {
+		t.Fatalf("InspectResourceLock() = %#v, want %#v", inspected, lock)
+	}
+	if _, err := operator.GetResource(ctx, OperatorPrincipal{ScopeID: root.ID}, child.ID); err != nil {
+		t.Fatalf("GetResource(same scope under ancestor lock) error = %v", err)
+	}
+	if _, err := operator.UpdateResourceTags(ctx, OperatorPrincipal{ScopeID: root.ID}, child.ID, map[string]string{"tier": "blocked"}, "request-locked", "correlation-locked"); !errors.Is(err, persistence.ErrResourceLocked) {
+		t.Fatalf("UpdateResourceTags(locked) error = %v, want resource lock", err)
+	}
+	if _, err := operator.CreateResource(ctx, OperatorPrincipal{ScopeID: root.ID}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "blocked", ParentID: root.ID}); !errors.Is(err, persistence.ErrResourceLocked) {
+		t.Fatalf("CreateResource(locked ancestor) error = %v, want resource lock", err)
+	}
+	if err := operator.DeleteResource(ctx, OperatorPrincipal{ScopeID: root.ID}, child.ID); !errors.Is(err, persistence.ErrResourceLocked) {
+		t.Fatalf("DeleteResource(locked ancestor) error = %v, want resource lock", err)
+	}
+	if _, err := operator.InspectResourceLock(ctx, OperatorPrincipal{ScopeID: other.ID}, root.ID); !errors.Is(err, ErrOperatorScopeDenied) {
+		t.Fatalf("InspectResourceLock(cross scope) error = %v, want scope denial", err)
+	}
+	if err := operator.ReleaseResourceLock(ctx, OperatorPrincipal{}, root.ID, models.ResourceLock{Owner: "other", Token: "wrong"}); !errors.Is(err, persistence.ErrResourceLockNotOwner) {
+		t.Fatalf("ReleaseResourceLock(wrong owner) error = %v, want owner error", err)
+	}
+	if err := operator.ReleaseResourceLock(ctx, OperatorPrincipal{}, root.ID, lock); err != nil {
+		t.Fatalf("ReleaseResourceLock(owner) error = %v", err)
+	}
+	if inspected, err := operator.InspectResourceLock(ctx, OperatorPrincipal{}, root.ID); err != nil || inspected != nil {
+		t.Fatalf("InspectResourceLock(after release) = %#v, %v, want nil lock", inspected, err)
+	}
+
+	if err := operator.DeleteResource(ctx, OperatorPrincipal{ScopeID: root.ID}, child.ID); err != nil {
+		t.Fatalf("DeleteResource(leaf) error = %v", err)
+	}
+	if err := operator.DeleteResource(ctx, OperatorPrincipal{}, root.ID); err != nil {
+		t.Fatalf("DeleteResource(root after leaf) error = %v", err)
+	}
+}
+
+func TestFileOperatorReopenPreservesResourcesAndProcessLocalLockContract(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "state")
+	first, err := NewFileOperator(root, 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	resource, err := first.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "platform"})
+	if err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+	lock := models.ResourceLock{Owner: "operator", Token: "reopen-token"}
+	if err := first.AcquireResourceLock(ctx, OperatorPrincipal{}, resource.ID, lock); err != nil {
+		t.Fatalf("AcquireResourceLock() error = %v", err)
+	}
+
+	reopened, err := NewFileOperator(root, 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator(reopen) error = %v", err)
+	}
+	got, err := reopened.GetResource(ctx, OperatorPrincipal{}, resource.ID)
+	if err != nil {
+		t.Fatalf("GetResource(reopen) error = %v", err)
+	}
+	if got.ID != resource.ID {
+		t.Fatalf("GetResource(reopen) ID = %q, want %q", got.ID, resource.ID)
+	}
+	inspected, err := reopened.InspectResourceLock(ctx, OperatorPrincipal{}, resource.ID)
+	if err != nil {
+		t.Fatalf("InspectResourceLock(reopen) error = %v", err)
+	}
+	if inspected != nil {
+		t.Fatalf("InspectResourceLock(reopen) = %#v, want process-local lock state", inspected)
+	}
+}
