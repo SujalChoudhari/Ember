@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+
+	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
 
 func runOperatorCLI(t *testing.T, operator *Operator, args ...string) OperatorResponse {
@@ -116,5 +118,66 @@ func TestCLIExposesBlobInspectionAndResetContract(t *testing.T) {
 	}
 	if _, err := runOperatorCLIResult(t, operator, "reset"); err != nil {
 		t.Fatalf("CLI root reset error = %v", err)
+	}
+}
+
+func TestCLIExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
+	operator := newTestOperator(t)
+
+	root := runOperatorCLI(t, operator, "resource", "create", "--type", "group", "--name", "root").Resource
+	other := runOperatorCLI(t, operator, "resource", "create", "--type", "group", "--name", "other").Resource
+	child := runOperatorCLI(t, operator, "resource", "create", "--scope", root.ID, "--parent", root.ID, "--type", "bucket", "--name", "assets").Resource
+
+	listed := runOperatorCLI(t, operator, "resource", "list", "--limit", "10")
+	if len(listed.Resources) != 2 || listed.Resources[0].ID != root.ID || listed.Resources[1].ID != other.ID {
+		t.Fatalf("CLI root list = %#v, want deterministic root resources", listed)
+	}
+	scoped := runOperatorCLI(t, operator, "resource", "list", "--scope", root.ID, "--limit", "10")
+	if len(scoped.Resources) != 1 || scoped.Resources[0].ID != child.ID {
+		t.Fatalf("CLI scoped list = %#v, want child resource", scoped)
+	}
+
+	updated := runOperatorCLI(t, operator, "resource", "update-tags", "--scope", root.ID, "--id", child.ID, "--tags", "tier=test", "--request-id", "request-cli-lifecycle", "--correlation-id", "correlation-cli-lifecycle")
+	if updated.Resource == nil || updated.Resource.ID != child.ID || updated.Resource.Spec.Tags["tier"] != "test" {
+		t.Fatalf("CLI tag update = %#v, want immutable identity and updated tags", updated)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--id", root.ID); !errors.Is(err, persistence.ErrResourceHasDependents) {
+		t.Fatalf("CLI delete dependent root error = %v, want dependent refusal", err)
+	}
+
+	acquired := runOperatorCLI(t, operator, "resource", "lock", "acquire", "--id", root.ID, "--owner", "operator", "--token", "lock-token")
+	if acquired.Lock == nil || acquired.Lock.Owner != "operator" || acquired.Lock.Token != "lock-token" {
+		t.Fatalf("CLI lock acquire = %#v, want lock response", acquired)
+	}
+	inspected := runOperatorCLI(t, operator, "resource", "lock", "inspect", "--id", root.ID)
+	if inspected.Lock == nil || *inspected.Lock != *acquired.Lock {
+		t.Fatalf("CLI lock inspect = %#v, want acquired lock", inspected)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "get", "--scope", root.ID, "--id", child.ID); err != nil {
+		t.Fatalf("CLI same-scope get under lock error = %v", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "update-tags", "--scope", root.ID, "--id", child.ID, "--tags", "tier=blocked", "--request-id", "request-cli-locked", "--correlation-id", "correlation-cli-locked"); !errors.Is(err, persistence.ErrResourceLocked) {
+		t.Fatalf("CLI locked update error = %v, want resource lock", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "create", "--scope", root.ID, "--parent", root.ID, "--type", "group", "--name", "blocked"); !errors.Is(err, persistence.ErrResourceLocked) {
+		t.Fatalf("CLI locked create error = %v, want resource lock", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--scope", root.ID, "--id", child.ID); !errors.Is(err, persistence.ErrResourceLocked) {
+		t.Fatalf("CLI locked delete error = %v, want resource lock", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "lock", "inspect", "--scope", other.ID, "--id", root.ID); !errors.Is(err, ErrOperatorScopeDenied) {
+		t.Fatalf("CLI cross-scope lock inspect error = %v, want scope denial", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "lock", "release", "--id", root.ID, "--owner", "other", "--token", "wrong"); !errors.Is(err, persistence.ErrResourceLockNotOwner) {
+		t.Fatalf("CLI wrong lock release error = %v, want owner error", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "lock", "release", "--id", root.ID, "--owner", "operator", "--token", "lock-token"); err != nil {
+		t.Fatalf("CLI lock release error = %v", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--scope", root.ID, "--id", child.ID); err != nil {
+		t.Fatalf("CLI leaf delete error = %v", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--id", root.ID); err != nil {
+		t.Fatalf("CLI root delete after leaf error = %v", err)
 	}
 }

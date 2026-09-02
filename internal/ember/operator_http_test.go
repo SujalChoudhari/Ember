@@ -271,3 +271,125 @@ func TestHTTPRejectsMalformedOversizedAndInvalidRangeRequests(t *testing.T) {
 		t.Fatalf("invalid blob range status = %d, body = %s", invalidRange.Code, invalidRange.Body.String())
 	}
 }
+
+func TestHTTPExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
+	operator := newTestOperator(t)
+	handler := NewHTTPHandler(operator)
+
+	create := func(scope string, resourceType models.ResourceType, name, parentID string) *models.Resource {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"type": resourceType, "name": name, "parentId": parentID})
+		if err != nil {
+			t.Fatalf("Marshal(create) error = %v", err)
+		}
+		response := operatorHTTPCall(t, handler, http.MethodPost, "/v1/resources", scope, body)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var envelope OperatorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode create response error = %v", err)
+		}
+		return envelope.Resource
+	}
+
+	root := create("", models.ResourceTypeGroup, "root", "")
+	other := create("", models.ResourceTypeGroup, "other", "")
+	child := create(root.ID, models.ResourceTypeBucket, "assets", root.ID)
+
+	list := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources?limit=10", "", nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("GET root resources status = %d, body = %s", list.Code, list.Body.String())
+	}
+	var listResponse OperatorResponse
+	if err := json.Unmarshal(list.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("decode root list response error = %v", err)
+	}
+	if len(listResponse.Resources) != 2 || listResponse.Resources[0].ID != root.ID || listResponse.Resources[1].ID != other.ID {
+		t.Fatalf("HTTP root list = %#v, want deterministic root resources", listResponse)
+	}
+
+	scopedList := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources?limit=10", root.ID, nil)
+	if scopedList.Code != http.StatusOK {
+		t.Fatalf("GET scoped resources status = %d, body = %s", scopedList.Code, scopedList.Body.String())
+	}
+	var scopedResponse OperatorResponse
+	if err := json.Unmarshal(scopedList.Body.Bytes(), &scopedResponse); err != nil {
+		t.Fatalf("decode scoped list response error = %v", err)
+	}
+	if len(scopedResponse.Resources) != 1 || scopedResponse.Resources[0].ID != child.ID {
+		t.Fatalf("HTTP scoped list = %#v, want child resource", scopedResponse)
+	}
+
+	dependentDelete := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+root.ID, "", nil)
+	if dependentDelete.Code != http.StatusConflict {
+		t.Fatalf("DELETE dependent root status = %d, body = %s", dependentDelete.Code, dependentDelete.Body.String())
+	}
+
+	lockBody, err := json.Marshal(map[string]string{"owner": "operator", "token": "lock-token"})
+	if err != nil {
+		t.Fatalf("Marshal(lock) error = %v", err)
+	}
+	acquire := operatorHTTPCall(t, handler, http.MethodPut, "/v1/resources/"+root.ID+"/lock", "", lockBody)
+	if acquire.Code != http.StatusOK {
+		t.Fatalf("PUT resource lock status = %d, body = %s", acquire.Code, acquire.Body.String())
+	}
+	var acquireResponse OperatorResponse
+	if err := json.Unmarshal(acquire.Body.Bytes(), &acquireResponse); err != nil {
+		t.Fatalf("decode lock acquire response error = %v", err)
+	}
+	if acquireResponse.Lock == nil || acquireResponse.Lock.Token != "lock-token" {
+		t.Fatalf("HTTP lock acquire = %#v, want lock response", acquireResponse)
+	}
+	inspect := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources/"+root.ID+"/lock", "", nil)
+	if inspect.Code != http.StatusOK {
+		t.Fatalf("GET resource lock status = %d, body = %s", inspect.Code, inspect.Body.String())
+	}
+	var inspectResponse OperatorResponse
+	if err := json.Unmarshal(inspect.Body.Bytes(), &inspectResponse); err != nil {
+		t.Fatalf("decode lock inspect response error = %v", err)
+	}
+	if inspectResponse.Lock == nil || *inspectResponse.Lock != *acquireResponse.Lock {
+		t.Fatalf("HTTP lock inspect = %#v, want acquired lock", inspectResponse)
+	}
+
+	read := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources/"+child.ID, root.ID, nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("GET same-scope child under lock status = %d, body = %s", read.Code, read.Body.String())
+	}
+	updateBody, err := json.Marshal(map[string]any{"tags": map[string]string{"tier": "blocked"}, "requestId": "request-http-locked", "correlationId": "correlation-http-locked"})
+	if err != nil {
+		t.Fatalf("Marshal(update) error = %v", err)
+	}
+	lockedUpdate := operatorHTTPCall(t, handler, http.MethodPatch, "/v1/resources/"+child.ID+"/tags", root.ID, updateBody)
+	if lockedUpdate.Code != http.StatusConflict {
+		t.Fatalf("PATCH locked child status = %d, body = %s", lockedUpdate.Code, lockedUpdate.Body.String())
+	}
+	lockedDelete := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+child.ID, root.ID, nil)
+	if lockedDelete.Code != http.StatusConflict {
+		t.Fatalf("DELETE locked child status = %d, body = %s", lockedDelete.Code, lockedDelete.Body.String())
+	}
+	crossScope := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources/"+root.ID+"/lock", other.ID, nil)
+	if crossScope.Code != http.StatusForbidden {
+		t.Fatalf("GET cross-scope lock status = %d, body = %s", crossScope.Code, crossScope.Body.String())
+	}
+
+	wrongReleaseBody, err := json.Marshal(map[string]string{"owner": "other", "token": "wrong"})
+	if err != nil {
+		t.Fatalf("Marshal(wrong release) error = %v", err)
+	}
+	wrongRelease := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+root.ID+"/lock", "", wrongReleaseBody)
+	if wrongRelease.Code != http.StatusConflict {
+		t.Fatalf("DELETE wrong lock owner status = %d, body = %s", wrongRelease.Code, wrongRelease.Body.String())
+	}
+	release := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+root.ID+"/lock", "", lockBody)
+	if release.Code != http.StatusNoContent {
+		t.Fatalf("DELETE owned lock status = %d, body = %s", release.Code, release.Body.String())
+	}
+	if response := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+child.ID, root.ID, nil); response.Code != http.StatusNoContent {
+		t.Fatalf("DELETE leaf status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+root.ID, "", nil); response.Code != http.StatusNoContent {
+		t.Fatalf("DELETE root status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
