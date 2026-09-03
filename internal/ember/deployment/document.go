@@ -16,6 +16,12 @@ const (
 	CurrentVersion = "v1"
 	// MaxDocumentBytes bounds parser input before JSON decoding begins.
 	MaxDocumentBytes = 64 << 10
+	// MaxParameterDeclarations bounds the parameter collection in one document.
+	MaxParameterDeclarations = 100
+	// MaxParameterNameLength bounds a parameter identifier.
+	MaxParameterNameLength = 64
+	// MaxParameterValueLength bounds a supplied or default parameter value.
+	MaxParameterValueLength = 1024
 	// MaxResourceDeclarations bounds the resource collection in one document.
 	MaxResourceDeclarations = 100
 )
@@ -56,10 +62,29 @@ func (err *ValidationError) Unwrap() error {
 	return ErrInvalidDocument
 }
 
-// Document is a validated v1 deployment document ready for a later planner.
+// ParameterType identifies the supported Azure-inspired parameter kinds.
+type ParameterType string
+
+const (
+	ParameterTypeString       ParameterType = "string"
+	ParameterTypeSecureString ParameterType = "secureString"
+)
+
+// ParameterDeclaration describes a bounded deployment input. Secure
+// parameters intentionally cannot have defaults because a default would put a
+// secret in the deployment document itself.
+type ParameterDeclaration struct {
+	Type         ParameterType
+	DefaultValue string
+	HasDefault   bool
+}
+
+// Document is a validated v1 deployment document ready for resolution and a
+// later planner.
 type Document struct {
-	Version   string
-	Resources []models.ResourceSpec
+	Version    string
+	Parameters map[string]ParameterDeclaration
+	Resources  []models.ResourceSpec
 }
 
 // ParseAndValidate parses one bounded JSON deployment document and validates
@@ -76,8 +101,9 @@ func ParseAndValidate(data []byte) (Document, error) {
 
 	diagnostics := make([]Diagnostic, 0)
 	appendUnknownFieldDiagnostics(&diagnostics, object, "$", map[string]struct{}{
-		"version":   {},
-		"resources": {},
+		"version":    {},
+		"parameters": {},
+		"resources":  {},
 	})
 
 	version, versionOK := parseStringField(object, "$", "version", true, &diagnostics)
@@ -89,6 +115,7 @@ func ParseAndValidate(data []byte) (Document, error) {
 		})
 	}
 
+	parameters, parametersOK := parseParameterValues(object, "$.parameters", &diagnostics)
 	resourceValues, resourcesOK := parseResourceValues(object, "$.resources", &diagnostics)
 	resourceSpecs := make([]models.ResourceSpec, 0, len(resourceValues))
 	if resourcesOK {
@@ -108,7 +135,10 @@ func ParseAndValidate(data []byte) (Document, error) {
 	if len(diagnostics) > 0 {
 		return Document{}, &ValidationError{Diagnostics: diagnostics}
 	}
-	return Document{Version: version, Resources: resourceSpecs}, nil
+	if !parametersOK {
+		return Document{}, &ValidationError{Diagnostics: diagnostics}
+	}
+	return Document{Version: version, Parameters: parameters, Resources: resourceSpecs}, nil
 }
 
 func decodeDocumentObject(data []byte) (map[string]json.RawMessage, error) {
@@ -215,6 +245,122 @@ func parseResourceValues(object map[string]json.RawMessage, path string, diagnos
 		return nil, false
 	}
 	return values, true
+}
+
+func parseParameterValues(object map[string]json.RawMessage, path string, diagnostics *[]Diagnostic) (map[string]ParameterDeclaration, bool) {
+	raw, exists := object["parameters"]
+	if !exists {
+		return nil, true
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		*diagnostics = append(*diagnostics, Diagnostic{
+			Path:    path,
+			Code:    "invalid_type",
+			Message: "parameters must be an object",
+		})
+		return nil, false
+	}
+	parameterValues, ok := decodeObjectField(raw)
+	if !ok {
+		*diagnostics = append(*diagnostics, Diagnostic{
+			Path:    path,
+			Code:    "invalid_type",
+			Message: "parameters must be an object",
+		})
+		return nil, false
+	}
+	if len(parameterValues) > MaxParameterDeclarations {
+		*diagnostics = append(*diagnostics, Diagnostic{
+			Path:    path,
+			Code:    "too_many_items",
+			Message: "parameters exceeds the configured limit",
+		})
+		return nil, false
+	}
+
+	keys := make([]string, 0, len(parameterValues))
+	for key := range parameterValues {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parameters := make(map[string]ParameterDeclaration, len(parameterValues))
+	for _, name := range keys {
+		parameterPath := path + "." + name
+		if !validParameterName(name) {
+			*diagnostics = append(*diagnostics, Diagnostic{
+				Path:    parameterPath,
+				Code:    "invalid_parameter_name",
+				Message: "parameter name is empty or has invalid characters",
+			})
+		}
+		parameterObject, objectOK := decodeObjectField(parameterValues[name])
+		if !objectOK {
+			*diagnostics = append(*diagnostics, Diagnostic{
+				Path:    parameterPath,
+				Code:    "invalid_type",
+				Message: "parameter declaration must be an object",
+			})
+			continue
+		}
+		appendUnknownFieldDiagnostics(diagnostics, parameterObject, parameterPath, map[string]struct{}{
+			"type":         {},
+			"defaultValue": {},
+		})
+
+		parameterType, typeOK := parseStringField(parameterObject, parameterPath, "type", true, diagnostics)
+		declaration := ParameterDeclaration{Type: ParameterType(parameterType)}
+		if typeOK && declaration.Type != ParameterTypeString && declaration.Type != ParameterTypeSecureString {
+			*diagnostics = append(*diagnostics, Diagnostic{
+				Path:    parameterPath + ".type",
+				Code:    "invalid_parameter_type",
+				Message: "parameter type is not supported",
+			})
+		}
+
+		if _, hasDefault := parameterObject["defaultValue"]; hasDefault {
+			defaultValue, defaultOK := parseStringField(parameterObject, parameterPath, "defaultValue", false, diagnostics)
+			if defaultOK {
+				declaration.DefaultValue = defaultValue
+				declaration.HasDefault = true
+				if len(defaultValue) > MaxParameterValueLength {
+					*diagnostics = append(*diagnostics, Diagnostic{
+						Path:    parameterPath + ".defaultValue",
+						Code:    "value_too_large",
+						Message: "parameter value exceeds the configured limit",
+					})
+				}
+				if declaration.Type == ParameterTypeSecureString {
+					*diagnostics = append(*diagnostics, Diagnostic{
+						Path:    parameterPath + ".defaultValue",
+						Code:    "secret_default_forbidden",
+						Message: "secure parameters cannot define a default value",
+					})
+				}
+			}
+		}
+		parameters[name] = declaration
+	}
+	return parameters, true
+}
+
+func validParameterName(name string) bool {
+	if strings.TrimSpace(name) != name || name == "" || len(name) > MaxParameterNameLength {
+		return false
+	}
+	for index := range name {
+		character := name[index]
+		if index == 0 {
+			if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || character == '_') {
+				return false
+			}
+			continue
+		}
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '_' || character == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func parseResource(raw json.RawMessage, index int, diagnostics *[]Diagnostic) models.ResourceSpec {
