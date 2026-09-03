@@ -250,3 +250,26 @@ func TestParseAndValidateAllowsExplicitEmptyParentID(t *testing.T) {
 		t.Fatalf("resources = %#v, want one root-scoped resource", document.Resources)
 	}
 }
+
+func TestParseAndValidateAcceptsBoundedParameterDeclarations(t *testing.T) {
+	document, err := ParseAndValidate([]byte(`{
+		"version": "v1",
+		"parameters": {
+			"environment": {"type": "string", "defaultValue": "dev"},
+			"credential": {"type": "secureString"}
+		},
+		"resources": []
+	}`))
+	if err != nil {
+		t.Fatalf("ParseAndValidate() error = %v", err)
+	}
+	if len(document.Parameters) != 2 {
+		t.Fatalf("parameters = %#v, want two declarations", document.Parameters)
+	}
+	if got := document.Parameters["environment"]; got.Type != ParameterTypeString || !got.HasDefault || got.DefaultValue != "dev" {
+		t.Fatalf("environment declaration = %#v, want ordinary default", got)
+	}
+	if got := document.Parameters["credential"]; got.Type != ParameterTypeSecureString || got.HasDefault {
+		t.Fatalf("credential declaration = %#v, want required secure parameter", got)
+	}
+}
