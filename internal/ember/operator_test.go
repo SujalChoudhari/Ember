@@ -375,3 +375,64 @@ func TestFileOperatorReopenPreservesResourcesAndProcessLocalLockContract(t *test
 		t.Fatalf("InspectResourceLock(reopen) = %#v, want process-local lock state", inspected)
 	}
 }
+
+func TestOperatorExposesCompleteBlobLifecycle(t *testing.T) {
+	operator := newTestOperator(t)
+	ctx := context.Background()
+
+	group, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "platform"})
+	if err != nil {
+		t.Fatalf("CreateResource(group) error = %v", err)
+	}
+	bucket, err := operator.CreateResource(ctx, OperatorPrincipal{ScopeID: group.ID}, models.ResourceSpec{Type: models.ResourceTypeBucket, Name: "assets", ParentID: group.ID})
+	if err != nil {
+		t.Fatalf("CreateResource(bucket) error = %v", err)
+	}
+	other, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "other"})
+	if err != nil {
+		t.Fatalf("CreateResource(other) error = %v", err)
+	}
+
+	for _, object := range []struct {
+		key  string
+		data string
+	}{
+		{key: "z.txt", data: "last"},
+		{key: "a.txt", data: "first"},
+	} {
+		if _, err := operator.PutBlob(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, object.key, []byte(object.data)); err != nil {
+			t.Fatalf("PutBlob(%q) error = %v", object.key, err)
+		}
+	}
+
+	listed, err := operator.ListBlobs(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, persistence.MaxBlobListLimit)
+	if err != nil {
+		t.Fatalf("ListBlobs() error = %v", err)
+	}
+	if listed == nil || len(listed.Objects) != 2 || listed.Objects[0].Key != "a.txt" || listed.Objects[1].Key != "z.txt" {
+		t.Fatalf("ListBlobs() = %#v, want sorted bounded objects", listed)
+	}
+	if _, err := operator.ListBlobs(ctx, OperatorPrincipal{ScopeID: other.ID}, bucket.ID, persistence.MaxBlobListLimit); !errors.Is(err, ErrOperatorScopeDenied) {
+		t.Fatalf("ListBlobs(cross scope) error = %v, want scope denial", err)
+	}
+	if err := operator.DeleteBlob(ctx, OperatorPrincipal{ScopeID: other.ID}, bucket.ID, "a.txt"); !errors.Is(err, ErrOperatorScopeDenied) {
+		t.Fatalf("DeleteBlob(cross scope) error = %v, want scope denial", err)
+	}
+
+	if err := operator.DeleteBlob(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, "a.txt"); err != nil {
+		t.Fatalf("DeleteBlob() error = %v", err)
+	}
+	if _, err := operator.GetBlob(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, "a.txt"); !errors.Is(err, persistence.ErrBlobObjectNotFound) {
+		t.Fatalf("GetBlob(deleted) error = %v, want object not found", err)
+	}
+	remaining, err := operator.ListBlobs(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, persistence.MaxBlobListLimit)
+	if err != nil {
+		t.Fatalf("ListBlobs(after delete) error = %v", err)
+	}
+	if remaining == nil || len(remaining.Objects) != 1 || remaining.Objects[0].Key != "z.txt" {
+		t.Fatalf("ListBlobs(after delete) = %#v, want remaining object", remaining)
+	}
+	if err := operator.DeleteBlob(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, "a.txt"); !errors.Is(err, persistence.ErrBlobObjectNotFound) {
+		t.Fatalf("DeleteBlob(missing) error = %v, want object not found", err)
+	}
+}

@@ -181,3 +181,44 @@ func TestCLIExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 		t.Fatalf("CLI root delete after leaf error = %v", err)
 	}
 }
+
+func TestCLIExposesCompleteBlobLifecycle(t *testing.T) {
+	operator := newTestOperator(t)
+	group := runOperatorCLI(t, operator, "resource", "create", "--type", "group", "--name", "platform").Resource
+	bucket := runOperatorCLI(t, operator, "resource", "create", "--scope", group.ID, "--parent", group.ID, "--type", "bucket", "--name", "assets").Resource
+	other := runOperatorCLI(t, operator, "resource", "create", "--type", "group", "--name", "other").Resource
+
+	for _, object := range []struct {
+		key  string
+		data string
+	}{
+		{key: "z.txt", data: "last"},
+		{key: "a.txt", data: "first"},
+	} {
+		put := runOperatorCLI(t, operator, "blob", "put", "--scope", group.ID, "--bucket", bucket.ID, "--key", object.key, "--data", object.data)
+		if put.Object == nil || put.Object.Key != object.key {
+			t.Fatalf("CLI blob put response = %#v, want %q", put, object.key)
+		}
+	}
+
+	listed := runOperatorCLI(t, operator, "blob", "list", "--scope", group.ID, "--bucket", bucket.ID, "--limit", "10")
+	if len(listed.Objects) != 2 || listed.Objects[0].Key != "a.txt" || listed.Objects[1].Key != "z.txt" {
+		t.Fatalf("CLI blob list = %#v, want sorted bounded objects", listed)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "blob", "list", "--scope", group.ID, "--bucket", bucket.ID, "--limit", "0"); !errors.Is(err, persistence.ErrInvalidBlobListLimit) {
+		t.Fatalf("CLI invalid blob list limit error = %v, want invalid limit", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "blob", "list", "--scope", other.ID, "--bucket", bucket.ID, "--limit", "10"); !errors.Is(err, ErrOperatorScopeDenied) {
+		t.Fatalf("CLI blob list cross-scope error = %v, want scope denial", err)
+	}
+
+	if _, err := runOperatorCLIResult(t, operator, "blob", "delete", "--scope", group.ID, "--bucket", bucket.ID, "--key", "a.txt"); err != nil {
+		t.Fatalf("CLI blob delete error = %v", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "blob", "get", "--scope", group.ID, "--bucket", bucket.ID, "--key", "a.txt"); !errors.Is(err, persistence.ErrBlobObjectNotFound) {
+		t.Fatalf("CLI deleted blob get error = %v, want object not found", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "blob", "delete", "--scope", other.ID, "--bucket", bucket.ID, "--key", "z.txt"); !errors.Is(err, ErrOperatorScopeDenied) {
+		t.Fatalf("CLI blob delete cross-scope error = %v, want scope denial", err)
+	}
+}

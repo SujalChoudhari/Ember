@@ -369,7 +369,47 @@ func blobPathFromPath(path string) (string, string, error) {
 	return bucketID, objectKey, nil
 }
 
+func blobBucketPathFromPath(path string) (string, error) {
+	rest := strings.TrimPrefix(path, "/v1/buckets/")
+	if !strings.HasSuffix(rest, "/objects") {
+		return "", errors.New("invalid blob path")
+	}
+	encoded := strings.TrimSuffix(rest, "/objects")
+	if encoded == "" || strings.Contains(encoded, "/") {
+		return "", errors.New("invalid blob path")
+	}
+	bucketID, err := url.PathUnescape(encoded)
+	if err != nil || bucketID == "" {
+		return "", errors.New("invalid blob path")
+	}
+	return bucketID, nil
+}
+
 func (handler *operatorHTTPHandler) blob(writer http.ResponseWriter, request *http.Request) {
+	if strings.HasSuffix(request.URL.Path, "/objects") {
+		bucketID, err := blobBucketPathFromPath(request.URL.Path)
+		if err != nil {
+			writeOperatorError(writer, http.StatusBadRequest, err)
+			return
+		}
+		if request.Method != http.MethodGet {
+			writer.Header().Set("Allow", http.MethodGet)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+		limit, err := queryLimit(request, persistence.MaxBlobListLimit)
+		if err != nil {
+			writeOperatorError(writer, http.StatusBadRequest, err)
+			return
+		}
+		response, err := handler.operator.ListBlobs(request.Context(), operatorPrincipal(request), bucketID, limit)
+		if err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, response)
+		return
+	}
 	bucketID, objectKey, err := blobPathFromPath(request.URL.Path)
 	if err != nil {
 		writeOperatorError(writer, http.StatusBadRequest, err)
@@ -416,8 +456,14 @@ func (handler *operatorHTTPHandler) blob(writer http.ResponseWriter, request *ht
 			return
 		}
 		writeOperatorJSON(writer, http.StatusOK, response)
+	case http.MethodDelete:
+		if err := handler.operator.DeleteBlob(request.Context(), operatorPrincipal(request), bucketID, objectKey); err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
 	default:
-		writer.Header().Set("Allow", http.MethodGet+", "+http.MethodPut)
+		writer.Header().Set("Allow", http.MethodDelete+", "+http.MethodGet+", "+http.MethodPut)
 		writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 	}
 }
@@ -432,7 +478,7 @@ func operatorErrorStatus(err error) int {
 	if errors.Is(err, persistence.ErrResourceLockConflict) || errors.Is(err, persistence.ErrResourceLockNotHeld) || errors.Is(err, persistence.ErrResourceLockNotOwner) || errors.Is(err, persistence.ErrResourceLocked) || errors.Is(err, persistence.ErrResourceHasDependents) || errors.Is(err, persistence.ErrOperationRequestConflict) {
 		return http.StatusConflict
 	}
-	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) {
+	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) || errors.Is(err, persistence.ErrInvalidBlobListLimit) {
 		return http.StatusBadRequest
 	}
 	if errors.Is(err, persistence.ErrBlobObjectTooLarge) || errors.Is(err, persistence.ErrBlobQuotaExceeded) {
