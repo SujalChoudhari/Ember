@@ -393,3 +393,94 @@ func TestHTTPExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 		t.Fatalf("DELETE root status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
+
+func TestHTTPExposesCompleteBlobLifecycle(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	operator, err := NewFileOperator(root, 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	handler := NewHTTPHandler(operator)
+
+	create := func(scope string, resourceType models.ResourceType, name, parentID string) *models.Resource {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"type": resourceType, "name": name, "parentId": parentID})
+		if err != nil {
+			t.Fatalf("Marshal(create) error = %v", err)
+		}
+		response := operatorHTTPCall(t, handler, http.MethodPost, "/v1/resources", scope, body)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var envelope OperatorResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode create response error = %v", err)
+		}
+		return envelope.Resource
+	}
+
+	group := create("", models.ResourceTypeGroup, "platform", "")
+	bucket := create(group.ID, models.ResourceTypeBucket, "assets", group.ID)
+	other := create("", models.ResourceTypeGroup, "other", "")
+
+	put := operatorHTTPCall(t, handler, http.MethodPut, "/v1/buckets/"+bucket.ID+"/objects/nested/file.txt", group.ID, []byte("hello world"))
+	if put.Code != http.StatusCreated {
+		t.Fatalf("PUT blob status = %d, body = %s", put.Code, put.Body.String())
+	}
+
+	get := operatorHTTPCall(t, handler, http.MethodGet, "/v1/buckets/"+bucket.ID+"/objects/nested/file.txt", group.ID, nil)
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET blob status = %d, body = %s", get.Code, get.Body.String())
+	}
+	var getResponse OperatorResponse
+	if err := json.Unmarshal(get.Body.Bytes(), &getResponse); err != nil {
+		t.Fatalf("decode GET blob response error = %v", err)
+	}
+	if getResponse.Object == nil || string(getResponse.Content) != "hello world" {
+		t.Fatalf("GET blob response = %#v, want metadata and content", getResponse)
+	}
+
+	rangeResult := operatorHTTPCall(t, handler, http.MethodGet, "/v1/buckets/"+bucket.ID+"/objects/nested/file.txt?start=6&end=11", group.ID, nil)
+	if rangeResult.Code != http.StatusOK {
+		t.Fatalf("GET blob range status = %d, body = %s", rangeResult.Code, rangeResult.Body.String())
+	}
+	var rangeResponse OperatorResponse
+	if err := json.Unmarshal(rangeResult.Body.Bytes(), &rangeResponse); err != nil {
+		t.Fatalf("decode GET blob range response error = %v", err)
+	}
+	if string(rangeResponse.Content) != "world" {
+		t.Fatalf("GET blob range content = %q, want world", rangeResponse.Content)
+	}
+
+	list := operatorHTTPCall(t, handler, http.MethodGet, "/v1/buckets/"+bucket.ID+"/objects?limit=10", group.ID, nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("GET blob list status = %d, body = %s", list.Code, list.Body.String())
+	}
+	var listResponse OperatorResponse
+	if err := json.Unmarshal(list.Body.Bytes(), &listResponse); err != nil {
+		t.Fatalf("decode GET blob list response error = %v", err)
+	}
+	if len(listResponse.Objects) != 1 || listResponse.Objects[0].Key != "nested/file.txt" {
+		t.Fatalf("GET blob list = %#v, want one object", listResponse)
+	}
+	if crossScope := operatorHTTPCall(t, handler, http.MethodGet, "/v1/buckets/"+bucket.ID+"/objects?limit=10", other.ID, nil); crossScope.Code != http.StatusForbidden {
+		t.Fatalf("GET cross-scope blob list status = %d, body = %s", crossScope.Code, crossScope.Body.String())
+	}
+	if invalidLimit := operatorHTTPCall(t, handler, http.MethodGet, "/v1/buckets/"+bucket.ID+"/objects?limit=0", group.ID, nil); invalidLimit.Code != http.StatusBadRequest {
+		t.Fatalf("GET invalid blob list limit status = %d, body = %s", invalidLimit.Code, invalidLimit.Body.String())
+	}
+
+	deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/buckets/"+bucket.ID+"/objects/nested/file.txt", group.ID, nil)
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("DELETE blob status = %d, body = %s", deleted.Code, deleted.Body.String())
+	}
+	if missing := operatorHTTPCall(t, handler, http.MethodGet, "/v1/buckets/"+bucket.ID+"/objects/nested/file.txt", group.ID, nil); missing.Code != http.StatusNotFound {
+		t.Fatalf("GET deleted blob status = %d, body = %s", missing.Code, missing.Body.String())
+	}
+	if reset := operatorHTTPCall(t, handler, http.MethodPost, "/v1/reset", "", nil); reset.Code != http.StatusNoContent {
+		t.Fatalf("POST reset status = %d, body = %s", reset.Code, reset.Body.String())
+	}
+	if missingResource := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources/"+group.ID, "", nil); missingResource.Code != http.StatusNotFound {
+		t.Fatalf("GET resource after reset status = %d, body = %s", missingResource.Code, missingResource.Body.String())
+	}
+}

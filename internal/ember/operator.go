@@ -42,6 +42,7 @@ type OperatorResponse struct {
 	Resources []models.Resource    `json:"resources,omitempty"`
 	Lock      *models.ResourceLock `json:"lock,omitempty"`
 	Object    *models.BlobObject   `json:"object,omitempty"`
+	Objects   []models.BlobObject  `json:"objects,omitempty"`
 	Content   []byte               `json:"content,omitempty"`
 	Operation *models.Operation    `json:"operation,omitempty"`
 	Audit     []models.AuditEntry  `json:"audit,omitempty"`
@@ -338,4 +339,22 @@ func (operator *Operator) ReadBlobRange(ctx context.Context, principal OperatorP
 		return nil, err
 	}
 	return &OperatorResponse{Content: content}, nil
+}
+
+func (operator *Operator) ListBlobs(ctx context.Context, principal OperatorPrincipal, bucketID string, limit int) (*OperatorResponse, error) {
+	if err := operator.authorizeBucket(ctx, principal, bucketID); err != nil {
+		return nil, err
+	}
+	objects, err := operator.blobs.List(ctx, bucketID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return &OperatorResponse{Objects: objects}, nil
+}
+
+func (operator *Operator) DeleteBlob(ctx context.Context, principal OperatorPrincipal, bucketID, objectKey string) error {
+	if err := operator.authorizeBucket(ctx, principal, bucketID); err != nil {
+		return err
+	}
+	return operator.blobs.Delete(ctx, bucketID, objectKey)
 }

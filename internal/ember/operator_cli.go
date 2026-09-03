@@ -65,6 +65,10 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 			return runCLIPutBlob(ctx, operator, args[2:], output)
 		case "get":
 			return runCLIGetBlob(ctx, operator, args[2:], output)
+		case "list":
+			return runCLIListBlobs(ctx, operator, args[2:], output)
+		case "delete":
+			return runCLIDeleteBlob(ctx, operator, args[2:], output)
 		default:
 			return ErrInvalidCLIRequest
 		}
@@ -314,6 +318,41 @@ func runCLIGetBlob(ctx context.Context, operator *Operator, args []string, outpu
 		return err
 	}
 	return writeCLIResponse(output, response)
+}
+
+func runCLIListBlobs(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("blob list")
+	scopeID := set.String("scope", "", "operator scope")
+	bucketID := set.String("bucket", "", "bucket resource ID")
+	limit := set.Int("limit", persistence.MaxBlobListLimit, "maximum objects")
+	if err := set.Parse(args); err != nil {
+		return ErrInvalidCLIRequest
+	}
+	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	response, err := operator.ListBlobs(ctx, OperatorPrincipal{ScopeID: *scopeID}, *bucketID, *limit)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, response)
+}
+
+func runCLIDeleteBlob(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("blob delete")
+	scopeID := set.String("scope", "", "operator scope")
+	bucketID := set.String("bucket", "", "bucket resource ID")
+	objectKey := set.String("key", "", "object key")
+	if err := set.Parse(args); err != nil {
+		return ErrInvalidCLIRequest
+	}
+	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	if err := operator.DeleteBlob(ctx, OperatorPrincipal{ScopeID: *scopeID}, *bucketID, *objectKey); err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{})
 }
 
 func runCLIGetOperation(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
