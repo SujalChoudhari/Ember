@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 )
@@ -34,12 +35,20 @@ type ApplyAuthority interface {
 	ApplyResource(ctx context.Context, action PlanAction, logicalID, resourceID string, spec *models.ResourceSpec, parentID, requestID, correlationID string) (*models.Resource, *models.Operation, error)
 }
 
+// ApplyProgressRecorder persists the redacted progress record owned by the
+// control plane. The deployment package only defines the write contract.
+type ApplyProgressRecorder interface {
+	Create(ctx context.Context, record models.ApplyProgressRecord) (*models.ApplyProgressRecord, error)
+	Update(ctx context.Context, record models.ApplyProgressRecord) error
+}
+
 // ApplyOptions controls one bounded plan application. Destructive changes are
 // never inferred from the caller's intent; ApproveDestructive must be true.
 type ApplyOptions struct {
 	RequestID          string
 	CorrelationID      string
 	ApproveDestructive bool
+	ProgressRecorder   ApplyProgressRecorder
 }
 
 // ApplyResult contains the preview that was applied and operation evidence for
@@ -103,32 +112,81 @@ func ApplyPlan(ctx context.Context, plan DeploymentPlan, document ResolvedDocume
 		return result, err
 	}
 	ordered := orderedApplyChanges(plan, graph, observedByID)
-	for _, change := range ordered {
+	if len(ordered) == 0 {
+		return result, nil
+	}
+	progress, err := newApplyProgressRecord(requestID, correlationID, ordered)
+	if err != nil {
+		return result, err
+	}
+	if options.ProgressRecorder != nil {
+		if _, err := options.ProgressRecorder.Create(ctx, progress); err != nil {
+			return result, err
+		}
+	}
+
+	for index, change := range ordered {
 		if change.Action == ActionNoOp {
+			markApplyProgressSucceeded(&progress, index, "")
+			if err := updateApplyProgress(ctx, options.ProgressRecorder, &progress); err != nil {
+				return result, err
+			}
 			continue
 		}
 		if err := ctx.Err(); err != nil {
+			if progressErr := failApplyProgress(ctx, options.ProgressRecorder, &progress, index, models.ApplyProgressFailureCancelled); progressErr != nil {
+				return result, progressErr
+			}
+			return result, err
+		}
+
+		progress.Entries[index].Status = models.ApplyProgressInProgress
+		progress.Entries[index].StartedAt = time.Now().UTC()
+		if err := updateApplyProgress(ctx, options.ProgressRecorder, &progress); err != nil {
 			return result, err
 		}
 
 		spec, parentID, err := applySpec(change, observedByID, actualByLogicalID)
 		if err != nil {
+			if progressErr := failApplyProgress(ctx, options.ProgressRecorder, &progress, index, models.ApplyProgressFailurePersistence); progressErr != nil {
+				return result, progressErr
+			}
 			return result, err
 		}
 		resource, operation, applyErr := authority.ApplyResource(ctx, change.Action, change.LogicalID, change.ResourceID, spec, parentID, requestID, correlationID)
 		if applyErr != nil {
+			if progressErr := failApplyProgress(ctx, options.ProgressRecorder, &progress, index, models.ApplyProgressFailureAuthority); progressErr != nil {
+				return result, progressErr
+			}
 			return result, applyErr
 		}
 		if operation == nil {
+			if progressErr := failApplyProgress(ctx, options.ProgressRecorder, &progress, index, models.ApplyProgressFailureIncompleteResult); progressErr != nil {
+				return result, progressErr
+			}
 			return result, ErrIncompleteApplyResult
 		}
 		result.Operations = append(result.Operations, operation)
+		progress.OperationIDs = append(progress.OperationIDs, operation.ID)
+		progress.Entries[index].OperationID = operation.ID
 		if resource != nil {
 			actualByLogicalID[change.LogicalID] = resource.ID
+			progress.Entries[index].ResourceID = resource.ID
 		}
 		if change.Action == ActionCreate && actualByLogicalID[change.LogicalID] == "" {
+			if progressErr := failApplyProgress(ctx, options.ProgressRecorder, &progress, index, models.ApplyProgressFailureIncompleteResult); progressErr != nil {
+				return result, progressErr
+			}
 			return result, ErrIncompleteApplyResult
 		}
+		markApplyProgressSucceeded(&progress, index, "")
+		if err := updateApplyProgress(ctx, options.ProgressRecorder, &progress); err != nil {
+			return result, err
+		}
+	}
+	progress.Status = models.ApplyProgressSucceeded
+	if err := updateApplyProgress(ctx, options.ProgressRecorder, &progress); err != nil {
+		return result, err
 	}
 	return result, nil
 }
@@ -216,6 +274,67 @@ func applyIdentifiers(options ApplyOptions) (string, string, error) {
 		return "", "", ErrInvalidApplyRequest
 	}
 	return requestID, correlationID, nil
+}
+
+func newApplyProgressRecord(requestID, correlationID string, changes []PlanChange) (models.ApplyProgressRecord, error) {
+	now := time.Now().UTC()
+	record := models.ApplyProgressRecord{
+		ID:            "apply-" + requestID,
+		RequestID:     requestID,
+		CorrelationID: correlationID,
+		Status:        models.ApplyProgressInProgress,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		Entries:       make([]models.ApplyProgressEntry, 0, len(changes)),
+	}
+	for _, change := range changes {
+		action := string(change.Action)
+		if action == string(ActionNoOp) {
+			action = models.ApplyProgressActionNoOp
+		}
+		record.Entries = append(record.Entries, models.ApplyProgressEntry{
+			LogicalID:  change.LogicalID,
+			ResourceID: change.ResourceID,
+			Action:     action,
+			Status:     models.ApplyProgressPending,
+		})
+	}
+	if err := record.Validate(); err != nil {
+		return models.ApplyProgressRecord{}, ErrInvalidApplyRequest
+	}
+	return record, nil
+}
+
+func updateApplyProgress(ctx context.Context, recorder ApplyProgressRecorder, record *models.ApplyProgressRecord) error {
+	if recorder == nil {
+		return nil
+	}
+	record.UpdatedAt = time.Now().UTC()
+	return recorder.Update(ctx, *record)
+}
+
+func markApplyProgressSucceeded(record *models.ApplyProgressRecord, index int, resourceID string) {
+	entry := &record.Entries[index]
+	entry.Status = models.ApplyProgressSucceeded
+	if resourceID != "" {
+		entry.ResourceID = resourceID
+	}
+	if entry.StartedAt.IsZero() {
+		entry.StartedAt = record.UpdatedAt
+	}
+	entry.CompletedAt = time.Now().UTC()
+}
+
+func failApplyProgress(ctx context.Context, recorder ApplyProgressRecorder, record *models.ApplyProgressRecord, index int, failure string) error {
+	entry := &record.Entries[index]
+	if entry.StartedAt.IsZero() {
+		entry.StartedAt = time.Now().UTC()
+	}
+	entry.Status = models.ApplyProgressFailed
+	entry.Failure = failure
+	entry.CompletedAt = time.Now().UTC()
+	record.Status = models.ApplyProgressFailed
+	return updateApplyProgress(ctx, recorder, record)
 }
 
 func orderedApplyChanges(plan DeploymentPlan, graph DependencyGraph, observedByID map[string]models.Resource) []PlanChange {

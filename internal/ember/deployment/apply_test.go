@@ -3,11 +3,13 @@ package deployment
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
+	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
 
 func TestApplyCreatesInDependencyOrderAndReturnsOperationEvidence(t *testing.T) {
@@ -139,6 +141,42 @@ func TestApplyPropagatesAuthorityFailureWithoutEchoingValues(t *testing.T) {
 	}
 }
 
+func TestApplyPersistsPartialFailureAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "apply-progress.json")
+	store, err := persistence.NewFileApplyProgressStore(path)
+	if err != nil {
+		t.Fatalf("NewFileApplyProgressStore() error = %v", err)
+	}
+	root := resolvedApplyResource(models.ResourceTypeGroup, "platform", "", nil)
+	child := resolvedApplyResource(models.ResourceTypeBucket, "assets", root.ID, nil)
+
+	_, applyErr := Apply(context.Background(), ResolvedDocument{
+		Version:   CurrentVersion,
+		Resources: []ResolvedResource{root, child},
+	}, nil, &partialFailureApplyAuthority{}, ApplyOptions{
+		RequestID:        "request-reopen-1",
+		CorrelationID:    "correlation-reopen-1",
+		ProgressRecorder: store,
+	})
+	if applyErr == nil {
+		t.Fatal("Apply() error = nil, want injected failure")
+	}
+	reopened, err := persistence.NewFileApplyProgressStore(path)
+	if err != nil {
+		t.Fatalf("NewFileApplyProgressStore(reopen) error = %v", err)
+	}
+	record, err := reopened.Get(context.Background(), "apply-request-reopen-1")
+	if err != nil {
+		t.Fatalf("Get(reopen) error = %v", err)
+	}
+	if got, want := progressStatuses(*record), []models.ApplyProgressStatus{models.ApplyProgressSucceeded, models.ApplyProgressFailed}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("reopened progress statuses = %#v, want %#v", got, want)
+	}
+	if record.Entries[1].Failure != models.ApplyProgressFailureAuthority || stringsContains(record.Entries[1].Failure, "secret") {
+		t.Fatalf("reopened failure = %q, want bounded redacted classification", record.Entries[1].Failure)
+	}
+}
+
 type applyCall struct {
 	action        PlanAction
 	logicalID     string
@@ -186,4 +224,77 @@ func stringsContains(value, fragment string) bool {
 		}
 	}
 	return false
+}
+
+func TestApplyRecordsBoundedPartialFailureProgress(t *testing.T) {
+	root := resolvedApplyResource(models.ResourceTypeGroup, "platform", "", nil)
+	child := resolvedApplyResource(models.ResourceTypeBucket, "assets", root.ID, nil)
+	recorder := &recordingApplyProgressRecorder{}
+	authority := &partialFailureApplyAuthority{}
+
+	result, err := Apply(context.Background(), ResolvedDocument{
+		Version:   CurrentVersion,
+		Resources: []ResolvedResource{root, child},
+	}, nil, authority, ApplyOptions{
+		RequestID:        "request-partial-1",
+		CorrelationID:    "correlation-partial-1",
+		ProgressRecorder: recorder,
+	})
+	if err == nil || result == nil {
+		t.Fatalf("Apply() = (%#v, %v), want partial failure", result, err)
+	}
+	if recorder.record.ID != "apply-request-partial-1" || recorder.record.RequestID != "request-partial-1" || recorder.record.CorrelationID != "correlation-partial-1" {
+		t.Fatalf("progress identity = %#v, want request/correlation linkage", recorder.record)
+	}
+	if got, want := progressStatuses(recorder.record), []models.ApplyProgressStatus{
+		models.ApplyProgressSucceeded,
+		models.ApplyProgressFailed,
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("progress statuses = %#v, want %#v", got, want)
+	}
+	if recorder.record.Entries[1].Failure != "apply authority failure" {
+		t.Fatalf("failure evidence = %q, want redacted classification", recorder.record.Entries[1].Failure)
+	}
+	if len(recorder.record.OperationIDs) != 1 || recorder.record.OperationIDs[0] != "operation-"+root.ID {
+		t.Fatalf("operation IDs = %#v, want completed operation only", recorder.record.OperationIDs)
+	}
+}
+
+type recordingApplyProgressRecorder struct {
+	record models.ApplyProgressRecord
+}
+
+func (recorder *recordingApplyProgressRecorder) Create(_ context.Context, record models.ApplyProgressRecord) (*models.ApplyProgressRecord, error) {
+	recorder.record = record
+	return &recorder.record, nil
+}
+
+func (recorder *recordingApplyProgressRecorder) Update(_ context.Context, record models.ApplyProgressRecord) error {
+	recorder.record = record
+	return nil
+}
+
+type partialFailureApplyAuthority struct {
+	calls int
+}
+
+func (authority *partialFailureApplyAuthority) ApplyResource(_ context.Context, action PlanAction, logicalID, resourceID string, spec *models.ResourceSpec, parentID, requestID, correlationID string) (*models.Resource, *models.Operation, error) {
+	authority.calls++
+	if authority.calls == 2 {
+		return nil, nil, errors.New("apply authority failure: secret-must-not-persist")
+	}
+	now := time.Unix(200, int64(authority.calls)).UTC()
+	operation := &models.Operation{ID: "operation-" + logicalID, ResourceID: logicalID, CorrelationID: correlationID, RequestID: requestID, Status: models.OperationStatusSucceeded, CreatedAt: now, UpdatedAt: now, Outcome: "applied"}
+	if action == ActionDelete {
+		return nil, operation, nil
+	}
+	return &models.Resource{ID: "actual-" + logicalID, Spec: *spec, ObservedState: models.ResourceStateReady}, operation, nil
+}
+
+func progressStatuses(record models.ApplyProgressRecord) []models.ApplyProgressStatus {
+	statuses := make([]models.ApplyProgressStatus, len(record.Entries))
+	for index, entry := range record.Entries {
+		statuses[index] = entry.Status
+	}
+	return statuses
 }
