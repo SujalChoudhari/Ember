@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
@@ -88,6 +89,22 @@ func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, reques
 	}
 	if strings.HasPrefix(request.URL.Path, "/v1/operations/") && request.Method == http.MethodGet {
 		handler.getOperation(writer, request)
+		return
+	}
+	if request.URL.Path == "/v1/apply-progress" {
+		handler.listApplyProgress(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/v1/apply-progress/") && request.Method == http.MethodGet {
+		handler.getApplyProgress(writer, request)
+		return
+	}
+	if request.URL.Path == "/v1/recoveries" {
+		handler.recoveries(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/v1/recoveries/") && request.Method == http.MethodGet {
+		handler.getRecovery(writer, request)
 		return
 	}
 	if strings.HasPrefix(request.URL.Path, "/v1/buckets/") {
@@ -318,6 +335,110 @@ func (handler *operatorHTTPHandler) getOperation(writer http.ResponseWriter, req
 	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Operation: operation})
 }
 
+func deploymentRecordIDFromPath(path, prefix, message string) (string, error) {
+	encoded := strings.TrimPrefix(path, prefix)
+	if encoded == "" || strings.Contains(encoded, "/") {
+		return "", errors.New(message)
+	}
+	recordID, err := url.PathUnescape(encoded)
+	if err != nil || recordID == "" {
+		return "", errors.New(message)
+	}
+	return recordID, nil
+}
+
+func (handler *operatorHTTPHandler) getApplyProgress(writer http.ResponseWriter, request *http.Request) {
+	recordID, err := deploymentRecordIDFromPath(request.URL.Path, "/v1/apply-progress/", "invalid apply progress path")
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	record, err := handler.operator.GetApplyProgress(request.Context(), operatorPrincipal(request), recordID)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{ApplyProgress: record})
+}
+
+func (handler *operatorHTTPHandler) listApplyProgress(writer http.ResponseWriter, request *http.Request) {
+	limit, err := queryLimit(request, persistence.MaxApplyProgressListLimit)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	operationID := request.URL.Query().Get("operationId")
+	if operationID != "" {
+		record, lookupErr := handler.operator.GetApplyProgressByOperation(request.Context(), operatorPrincipal(request), operationID)
+		if lookupErr != nil {
+			writeOperatorError(writer, operatorErrorStatus(lookupErr), lookupErr)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{ApplyProgress: record})
+		return
+	}
+	records, err := handler.operator.ListApplyProgress(request.Context(), operatorPrincipal(request), limit)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{ApplyProgresses: records})
+}
+
+type recoveryRequestBody struct {
+	RequestID       string                `json:"requestId"`
+	ApplyProgressID string                `json:"applyProgressId"`
+	Action          models.RecoveryAction `json:"action"`
+}
+
+func (handler *operatorHTTPHandler) getRecovery(writer http.ResponseWriter, request *http.Request) {
+	recordID, err := deploymentRecordIDFromPath(request.URL.Path, "/v1/recoveries/", "invalid recovery path")
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	record, err := handler.operator.GetRecovery(request.Context(), operatorPrincipal(request), recordID)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Recovery: record})
+}
+
+func (handler *operatorHTTPHandler) recoveries(writer http.ResponseWriter, request *http.Request) {
+	switch request.Method {
+	case http.MethodGet:
+		limit, err := queryLimit(request, persistence.MaxRecoveryListLimit)
+		if err != nil {
+			writeOperatorError(writer, http.StatusBadRequest, err)
+			return
+		}
+		records, err := handler.operator.ListRecoveries(request.Context(), operatorPrincipal(request), limit)
+		if err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Recoveries: records})
+	case http.MethodPost:
+		var body recoveryRequestBody
+		if err := decodeOperatorJSON(writer, request, &body); err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		response, err := handler.operator.Recover(request.Context(), operatorPrincipal(request), deployment.RecoveryRequest{
+			RequestID: body.RequestID, ApplyProgressID: body.ApplyProgressID, Action: body.Action,
+		})
+		if err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, response)
+	default:
+		writer.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+		writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+	}
+}
+
 func queryLimit(request *http.Request, defaultLimit int) (int, error) {
 	value := request.URL.Query().Get("limit")
 	if value == "" {
@@ -472,13 +593,13 @@ func operatorErrorStatus(err error) int {
 	if errors.Is(err, ErrOperatorScopeDenied) {
 		return http.StatusForbidden
 	}
-	if errors.Is(err, persistence.ErrResourceNotFound) || errors.Is(err, persistence.ErrOperationNotFound) || errors.Is(err, persistence.ErrBlobObjectNotFound) {
+	if errors.Is(err, persistence.ErrResourceNotFound) || errors.Is(err, persistence.ErrOperationNotFound) || errors.Is(err, persistence.ErrBlobObjectNotFound) || errors.Is(err, persistence.ErrApplyProgressNotFound) || errors.Is(err, persistence.ErrRecoveryNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, persistence.ErrResourceLockConflict) || errors.Is(err, persistence.ErrResourceLockNotHeld) || errors.Is(err, persistence.ErrResourceLockNotOwner) || errors.Is(err, persistence.ErrResourceLocked) || errors.Is(err, persistence.ErrResourceHasDependents) || errors.Is(err, persistence.ErrOperationRequestConflict) {
+	if errors.Is(err, persistence.ErrResourceLockConflict) || errors.Is(err, persistence.ErrResourceLockNotHeld) || errors.Is(err, persistence.ErrResourceLockNotOwner) || errors.Is(err, persistence.ErrResourceLocked) || errors.Is(err, persistence.ErrResourceHasDependents) || errors.Is(err, persistence.ErrOperationRequestConflict) || errors.Is(err, persistence.ErrRecoveryRequestConflict) {
 		return http.StatusConflict
 	}
-	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) || errors.Is(err, persistence.ErrInvalidBlobListLimit) {
+	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) || errors.Is(err, persistence.ErrInvalidBlobListLimit) || errors.Is(err, persistence.ErrInvalidApplyProgressListLimit) || errors.Is(err, persistence.ErrInvalidRecoveryListLimit) || errors.Is(err, deployment.ErrInvalidRecoveryRequest) || errors.Is(err, deployment.ErrUnsupportedRecoveryFailure) || errors.Is(err, deployment.ErrRecoveryApplyNotReady) {
 		return http.StatusBadRequest
 	}
 	if errors.Is(err, persistence.ErrBlobObjectTooLarge) || errors.Is(err, persistence.ErrBlobQuotaExceeded) {

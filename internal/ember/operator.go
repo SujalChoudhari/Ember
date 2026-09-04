@@ -12,11 +12,12 @@ import (
 )
 
 var (
-	ErrInvalidOperator          = errors.New("invalid operator")
-	ErrInvalidOperatorPrincipal = errors.New("invalid operator principal")
-	ErrOperatorScopeDenied      = errors.New("operator scope denied")
-	ErrOperatorResetUnavailable = errors.New("operator reset unavailable")
-	ErrOperatorBucketRequired   = errors.New("operator resource is not a bucket")
+	ErrInvalidOperator               = errors.New("invalid operator")
+	ErrInvalidOperatorPrincipal      = errors.New("invalid operator principal")
+	ErrOperatorScopeDenied           = errors.New("operator scope denied")
+	ErrOperatorResetUnavailable      = errors.New("operator reset unavailable")
+	ErrOperatorBucketRequired        = errors.New("operator resource is not a bucket")
+	ErrOperatorDeploymentUnavailable = errors.New("operator deployment inspection unavailable")
 )
 
 type OperatorPrincipal struct {
@@ -35,21 +36,36 @@ type Operator struct {
 	blobs      persistence.BlobStore
 	operations ResourceOperationControlPlane
 	reset      func(context.Context) error
+	deployment DeploymentControlPlane
 }
 
 type OperatorResponse struct {
-	Resource  *models.Resource     `json:"resource,omitempty"`
-	Resources []models.Resource    `json:"resources,omitempty"`
-	Lock      *models.ResourceLock `json:"lock,omitempty"`
-	Object    *models.BlobObject   `json:"object,omitempty"`
-	Objects   []models.BlobObject  `json:"objects,omitempty"`
-	Content   []byte               `json:"content,omitempty"`
-	Operation *models.Operation    `json:"operation,omitempty"`
-	Audit     []models.AuditEntry  `json:"audit,omitempty"`
-	Replayed  bool                 `json:"replayed,omitempty"`
+	Resource        *models.Resource             `json:"resource,omitempty"`
+	Resources       []models.Resource            `json:"resources,omitempty"`
+	Lock            *models.ResourceLock         `json:"lock,omitempty"`
+	Object          *models.BlobObject           `json:"object,omitempty"`
+	Objects         []models.BlobObject          `json:"objects,omitempty"`
+	Content         []byte                       `json:"content,omitempty"`
+	Operation       *models.Operation            `json:"operation,omitempty"`
+	Audit           []models.AuditEntry          `json:"audit,omitempty"`
+	ApplyProgress   *models.ApplyProgressRecord  `json:"applyProgress,omitempty"`
+	ApplyProgresses []models.ApplyProgressRecord `json:"applyProgresses,omitempty"`
+	Recovery        *models.RecoveryRecord       `json:"recovery,omitempty"`
+	Recoveries      []models.RecoveryRecord      `json:"recoveries,omitempty"`
+	Replayed        bool                         `json:"replayed,omitempty"`
 }
 
 func NewOperator(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error) (*Operator, error) {
+	return newOperator(resources, blobs, operations, reset, nil)
+}
+
+// NewOperatorWithDeployment composes the operator with the existing bounded
+// deployment inspection and recovery control plane.
+func NewOperatorWithDeployment(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error, deployment DeploymentControlPlane) (*Operator, error) {
+	return newOperator(resources, blobs, operations, reset, deployment)
+}
+
+func newOperator(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error, deployment DeploymentControlPlane) (*Operator, error) {
 	if resources == nil || blobs == nil || operations == nil || reset == nil {
 		return nil, ErrInvalidOperator
 	}
@@ -58,6 +74,7 @@ func NewOperator(resources ResourceControlPlane, blobs persistence.BlobStore, op
 		blobs:      blobs,
 		operations: operations,
 		reset:      reset,
+		deployment: deployment,
 	}, nil
 }
 

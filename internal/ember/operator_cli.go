@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
@@ -82,11 +83,133 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 			return ErrInvalidCLIRequest
 		}
 		return runCLIListAudit(ctx, operator, args[2:], output)
+	case "deployment":
+		return runCLIDeployment(ctx, operator, args[1:], output)
 	case "reset":
 		return runCLIReset(ctx, operator, args[1:], output)
 	default:
 		return ErrInvalidCLIRequest
 	}
+}
+
+func runCLIDeployment(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	if len(args) < 2 {
+		return ErrInvalidCLIRequest
+	}
+	switch args[0] {
+	case "apply-progress":
+		switch args[1] {
+		case "get":
+			return runCLIGetApplyProgress(ctx, operator, args[2:], output)
+		case "list":
+			return runCLIListApplyProgress(ctx, operator, args[2:], output)
+		case "operation":
+			return runCLIGetApplyProgressByOperation(ctx, operator, args[2:], output)
+		default:
+			return ErrInvalidCLIRequest
+		}
+	case "recovery":
+		switch args[1] {
+		case "get":
+			return runCLIGetRecovery(ctx, operator, args[2:], output)
+		case "list":
+			return runCLIListRecoveries(ctx, operator, args[2:], output)
+		case "run":
+			return runCLIRunRecovery(ctx, operator, args[2:], output)
+		default:
+			return ErrInvalidCLIRequest
+		}
+	default:
+		return ErrInvalidCLIRequest
+	}
+}
+
+func runCLIGetApplyProgress(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("deployment apply-progress get")
+	scopeID := set.String("scope", "", "operator scope")
+	recordID := set.String("id", "", "apply progress ID")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	record, err := operator.GetApplyProgress(ctx, OperatorPrincipal{ScopeID: *scopeID}, *recordID)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{ApplyProgress: record})
+}
+
+func runCLIListApplyProgress(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("deployment apply-progress list")
+	scopeID := set.String("scope", "", "operator scope")
+	limit := set.Int("limit", persistence.MaxApplyProgressListLimit, "maximum apply progress records")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	records, err := operator.ListApplyProgress(ctx, OperatorPrincipal{ScopeID: *scopeID}, *limit)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{ApplyProgresses: records})
+}
+
+func runCLIGetApplyProgressByOperation(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("deployment apply-progress operation")
+	scopeID := set.String("scope", "", "operator scope")
+	operationID := set.String("id", "", "operation ID")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	record, err := operator.GetApplyProgressByOperation(ctx, OperatorPrincipal{ScopeID: *scopeID}, *operationID)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{ApplyProgress: record})
+}
+
+func runCLIGetRecovery(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("deployment recovery get")
+	scopeID := set.String("scope", "", "operator scope")
+	recordID := set.String("id", "", "recovery record ID")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	record, err := operator.GetRecovery(ctx, OperatorPrincipal{ScopeID: *scopeID}, *recordID)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Recovery: record})
+}
+
+func runCLIListRecoveries(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("deployment recovery list")
+	scopeID := set.String("scope", "", "operator scope")
+	limit := set.Int("limit", persistence.MaxRecoveryListLimit, "maximum recovery records")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	records, err := operator.ListRecoveries(ctx, OperatorPrincipal{ScopeID: *scopeID}, *limit)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Recoveries: records})
+}
+
+func runCLIRunRecovery(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("deployment recovery run")
+	scopeID := set.String("scope", "", "operator scope")
+	requestID := set.String("request-id", "", "recovery request ID")
+	applyProgressID := set.String("apply-progress-id", "", "apply progress ID")
+	action := set.String("action", "", "recovery action")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	response, err := operator.Recover(ctx, OperatorPrincipal{ScopeID: *scopeID}, deployment.RecoveryRequest{
+		RequestID: *requestID, ApplyProgressID: *applyProgressID, Action: models.RecoveryAction(*action),
+	})
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, response)
 }
 
 func newCLIFlagSet(name string) *flag.FlagSet {
