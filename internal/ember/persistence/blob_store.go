@@ -27,23 +27,27 @@ const (
 )
 
 var (
-	ErrInvalidBlobStorePath = errors.New("invalid blob store path")
-	ErrInvalidBlobQuota     = errors.New("invalid blob store quota")
-	ErrInvalidBlobRetention = errors.New("invalid blob retention")
-	ErrBlobObjectNotFound   = errors.New("blob object not found")
-	ErrBlobObjectCorrupt    = errors.New("corrupt blob object")
-	ErrBlobObjectTooLarge   = errors.New("blob object exceeds size limit")
-	ErrBlobQuotaExceeded    = errors.New("blob store quota exceeded")
-	ErrInvalidBlobRange     = errors.New("invalid blob range")
-	ErrInvalidBlobListLimit = errors.New("invalid blob list limit")
-	ErrBlobStoreCorrupt     = errors.New("corrupt blob store")
-	ErrBlobStoreTooLarge    = errors.New("blob store metadata exceeds size limit")
-	ErrBlobStoreIO          = errors.New("blob store I/O failure")
+	ErrInvalidBlobStorePath         = errors.New("invalid blob store path")
+	ErrInvalidBlobQuota             = errors.New("invalid blob store quota")
+	ErrInvalidBlobRetention         = errors.New("invalid blob retention")
+	ErrBlobObjectNotFound           = errors.New("blob object not found")
+	ErrBlobObjectCorrupt            = errors.New("corrupt blob object")
+	ErrBlobObjectTooLarge           = errors.New("blob object exceeds size limit")
+	ErrBlobQuotaExceeded            = errors.New("blob store quota exceeded")
+	ErrInvalidBlobRange             = errors.New("invalid blob range")
+	ErrInvalidBlobListLimit         = errors.New("invalid blob list limit")
+	ErrBlobStoreCorrupt             = errors.New("corrupt blob store")
+	ErrBlobStoreTooLarge            = errors.New("blob store metadata exceeds size limit")
+	ErrBlobStoreIO                  = errors.New("blob store I/O failure")
+	ErrBlobRecoveryChecksumMismatch = errors.New("blob recovery checksum mismatch")
+	ErrBlobRecoveryConflict         = errors.New("blob recovery conflict")
 )
 
 type BlobStore interface {
 	Put(ctx context.Context, bucketID, objectKey string, content []byte) (*models.BlobObject, error)
 	Get(ctx context.Context, bucketID, objectKey string) (*models.BlobObject, []byte, error)
+	Verify(ctx context.Context, bucketID, objectKey string) (*models.BlobIntegrityReport, error)
+	Recover(ctx context.Context, bucketID, objectKey, expectedSHA256 string, content []byte) (*models.BlobObject, error)
 	ReadRange(ctx context.Context, bucketID, objectKey string, start, end int64) ([]byte, error)
 	List(ctx context.Context, bucketID string, limit int) ([]models.BlobObject, error)
 	Delete(ctx context.Context, bucketID, objectKey string) error
@@ -145,8 +149,7 @@ func (store *FileBlobStore) load() error {
 		if object.Size > store.quota-usedBytes {
 			return ErrBlobQuotaExceeded
 		}
-		info, err := os.Lstat(store.objectPath(object.BucketID, object.Key))
-		if err != nil || !info.Mode().IsRegular() || info.Size() != object.Size {
+		if _, err := os.Lstat(store.objectPath(object.BucketID, object.Key)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return ErrBlobStoreCorrupt
 		}
 		objects[key] = object
@@ -331,32 +334,155 @@ func rollbackBlobPayload(path, backupPath string) error {
 }
 
 func (store *FileBlobStore) readBlobPayloadLocked(object models.BlobObject) ([]byte, error) {
+	_, data, err := store.inspectBlobPayloadLocked(object)
+	return data, err
+}
+
+func (store *FileBlobStore) inspectBlobPayloadLocked(object models.BlobObject) (*models.BlobIntegrityReport, []byte, error) {
+	report := &models.BlobIntegrityReport{
+		BucketID:       object.BucketID,
+		Key:            object.Key,
+		ExpectedSHA256: object.SHA256,
+		ExpectedSize:   object.Size,
+		Status:         models.BlobIntegrityCorrupt,
+	}
 	path := store.objectPath(object.BucketID, object.Key)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
-		return nil, ErrBlobObjectCorrupt
+		return report, nil, ErrBlobObjectCorrupt
 	}
 	if err != nil {
-		return nil, ErrBlobStoreIO
+		return nil, nil, ErrBlobStoreIO
 	}
-	if info.Size() != object.Size {
-		return nil, ErrBlobObjectCorrupt
+	report.ObservedSize = info.Size()
+	if info.Size() > models.MaxBlobObjectSize {
+		return report, nil, ErrBlobObjectCorrupt
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, ErrBlobObjectCorrupt
+		return report, nil, ErrBlobObjectCorrupt
 	}
 	if err != nil {
-		return nil, ErrBlobStoreIO
+		return nil, nil, ErrBlobStoreIO
 	}
-	if int64(len(data)) != object.Size {
-		return nil, ErrBlobObjectCorrupt
+	report.ObservedSize = int64(len(data))
+	if len(data) > int(models.MaxBlobObjectSize) {
+		return report, nil, ErrBlobObjectCorrupt
 	}
 	digest := sha256.Sum256(data)
-	if hex.EncodeToString(digest[:]) != object.SHA256 {
-		return nil, ErrBlobObjectCorrupt
+	report.ObservedSHA256 = hex.EncodeToString(digest[:])
+	if report.ObservedSize != report.ExpectedSize || report.ObservedSHA256 != report.ExpectedSHA256 {
+		return report, nil, ErrBlobObjectCorrupt
 	}
-	return data, nil
+	report.Status = models.BlobIntegrityVerified
+	return report, data, nil
+}
+
+// Verify returns bounded metadata-only evidence. A checksum mismatch is
+// returned as ErrBlobObjectCorrupt together with a report for safe inspection.
+func (store *FileBlobStore) Verify(ctx context.Context, bucketID, objectKey string) (*models.BlobIntegrityReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateBlobInputs(bucketID, objectKey); err != nil {
+		return nil, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	object, exists := store.objects[blobObjectMapKey(bucketID, objectKey)]
+	if !exists {
+		return nil, ErrBlobObjectNotFound
+	}
+	report, _, err := store.inspectBlobPayloadLocked(object)
+	return report, err
+}
+
+// Recover explicitly replaces a corrupt object with trusted content whose
+// checksum matches expectedSHA256. A valid object is never silently replaced;
+// repeating the same recovery is an idempotent no-op.
+func (store *FileBlobStore) Recover(ctx context.Context, bucketID, objectKey, expectedSHA256 string, content []byte) (*models.BlobObject, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateBlobInputs(bucketID, objectKey); err != nil {
+		return nil, err
+	}
+	if len(content) > int(models.MaxBlobObjectSize) {
+		return nil, ErrBlobObjectTooLarge
+	}
+	expectedDigest, err := hex.DecodeString(expectedSHA256)
+	if err != nil || len(expectedDigest) != sha256.Size {
+		return nil, ErrBlobRecoveryChecksumMismatch
+	}
+	expectedSHA256 = hex.EncodeToString(expectedDigest)
+	digest := sha256.Sum256(content)
+	if !bytes.Equal(digest[:], expectedDigest) {
+		return nil, ErrBlobRecoveryChecksumMismatch
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	mapKey := blobObjectMapKey(bucketID, objectKey)
+	object, exists := store.objects[mapKey]
+	if !exists {
+		return nil, ErrBlobObjectNotFound
+	}
+	if report, _, verifyErr := store.inspectBlobPayloadLocked(object); verifyErr == nil {
+		if report.ObservedSHA256 == expectedSHA256 {
+			copy := object
+			return &copy, nil
+		}
+		return nil, ErrBlobRecoveryConflict
+	} else if !errors.Is(verifyErr, ErrBlobObjectCorrupt) {
+		return nil, verifyErr
+	}
+	updated := object
+	updated.VersionID = expectedSHA256
+	updated.SHA256 = expectedSHA256
+	updated.ETag = expectedSHA256
+	updated.Size = int64(len(content))
+	if err := updated.Validate(); err != nil {
+		return nil, err
+	}
+	used := store.usedBytesLocked() - object.Size
+	if updated.Size > store.quota-used {
+		return nil, ErrBlobQuotaExceeded
+	}
+
+	path := store.objectPath(bucketID, objectKey)
+	temporaryPath, err := writeBlobPayload(path, content)
+	if err != nil {
+		return nil, err
+	}
+	backupPath := ""
+	if _, statErr := os.Lstat(path); statErr == nil {
+		backupPath, err = moveBlobToBackup(path)
+		if err != nil {
+			_ = os.Remove(temporaryPath)
+			return nil, err
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		_ = os.Remove(temporaryPath)
+		return nil, ErrBlobStoreIO
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		_ = os.Remove(temporaryPath)
+		_ = rollbackBlobPayload(path, backupPath)
+		return nil, ErrBlobStoreIO
+	}
+	store.objects[mapKey] = updated
+	if err := store.saveLocked(); err != nil {
+		store.objects[mapKey] = object
+		if rollbackErr := rollbackBlobPayload(path, backupPath); rollbackErr != nil {
+			return nil, rollbackErr
+		}
+		return nil, err
+	}
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
+	}
+	copy := updated
+	return &copy, nil
 }
 
 func (store *FileBlobStore) Put(ctx context.Context, bucketID, objectKey string, content []byte) (*models.BlobObject, error) {

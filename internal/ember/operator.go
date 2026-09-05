@@ -12,12 +12,13 @@ import (
 )
 
 var (
-	ErrInvalidOperator               = errors.New("invalid operator")
-	ErrInvalidOperatorPrincipal      = errors.New("invalid operator principal")
-	ErrOperatorScopeDenied           = errors.New("operator scope denied")
-	ErrOperatorResetUnavailable      = errors.New("operator reset unavailable")
-	ErrOperatorBucketRequired        = errors.New("operator resource is not a bucket")
-	ErrOperatorDeploymentUnavailable = errors.New("operator deployment inspection unavailable")
+	ErrInvalidOperator                 = errors.New("invalid operator")
+	ErrInvalidOperatorPrincipal        = errors.New("invalid operator principal")
+	ErrOperatorScopeDenied             = errors.New("operator scope denied")
+	ErrOperatorResetUnavailable        = errors.New("operator reset unavailable")
+	ErrOperatorBucketRequired          = errors.New("operator resource is not a bucket")
+	ErrOperatorBlobRecoveryUnavailable = errors.New("operator blob recovery unavailable")
+	ErrOperatorDeploymentUnavailable   = errors.New("operator deployment inspection unavailable")
 )
 
 type OperatorPrincipal struct {
@@ -44,6 +45,7 @@ type OperatorResponse struct {
 	Resources       []models.Resource            `json:"resources,omitempty"`
 	Lock            *models.ResourceLock         `json:"lock,omitempty"`
 	Object          *models.BlobObject           `json:"object,omitempty"`
+	Integrity       *models.BlobIntegrityReport  `json:"integrity,omitempty"`
 	Objects         []models.BlobObject          `json:"objects,omitempty"`
 	Content         []byte                       `json:"content,omitempty"`
 	Operation       *models.Operation            `json:"operation,omitempty"`
@@ -345,6 +347,50 @@ func (operator *Operator) GetBlob(ctx context.Context, principal OperatorPrincip
 		return nil, err
 	}
 	return &OperatorResponse{Object: object, Content: content}, nil
+}
+
+func (operator *Operator) VerifyBlob(ctx context.Context, principal OperatorPrincipal, bucketID, objectKey string) (*OperatorResponse, error) {
+	if err := operator.authorizeBucket(ctx, principal, bucketID); err != nil {
+		return nil, err
+	}
+	report, err := operator.blobs.Verify(ctx, bucketID, objectKey)
+	return &OperatorResponse{Integrity: report}, err
+}
+
+func (operator *Operator) RecoverBlob(ctx context.Context, principal OperatorPrincipal, bucketID, objectKey, expectedSHA256 string, content []byte, requestID, correlationID string) (*OperatorResponse, error) {
+	if err := operator.authorizeBucket(ctx, principal, bucketID); err != nil {
+		return nil, err
+	}
+	request := ResourceOperationRequest{
+		ResourceID:    bucketID,
+		ScopeID:       principal.ScopeID,
+		Action:        "blob.recover",
+		RequestID:     requestID,
+		CorrelationID: correlationID,
+	}
+	var object *models.BlobObject
+	var recoveryErr error
+	result, err := operator.operations.Execute(ctx, request, func(effectContext context.Context) error {
+		object, recoveryErr = operator.blobs.Recover(effectContext, bucketID, objectKey, expectedSHA256, content)
+		return recoveryErr
+	})
+	if err != nil && result == nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, ErrOperatorBlobRecoveryUnavailable
+	}
+	if err != nil {
+		return &OperatorResponse{Operation: &result.Operation, Replayed: result.Replayed}, err
+	}
+	if object == nil {
+		object, _, err = operator.blobs.Get(ctx, bucketID, objectKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+	response := &OperatorResponse{Object: object, Operation: &result.Operation, Replayed: result.Replayed}
+	return response, err
 }
 
 func (operator *Operator) ReadBlobRange(ctx context.Context, principal OperatorPrincipal, bucketID, objectKey string, start, end int64) (*OperatorResponse, error) {

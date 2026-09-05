@@ -289,3 +289,85 @@ func TestFileBlobStoreRejectsUnsafeObjectInputs(t *testing.T) {
 		t.Fatalf("Get(unsafe bucket) error = %v, want ErrInvalidBlobBucketID", err)
 	}
 }
+
+func TestFileBlobStoreReportsTamperedContentAndRecoversExplicitly(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := NewFileBlobStore(root, 64)
+	if err != nil {
+		t.Fatalf("NewFileBlobStore() error = %v", err)
+	}
+	trusted := []byte("payload")
+	object := putBlob(t, store, "resource-1", "object", trusted)
+	if err := os.WriteFile(store.objectPath("resource-1", "object"), []byte("payloAd"), 0o600); err != nil {
+		t.Fatalf("WriteFile(corruption) error = %v", err)
+	}
+
+	report, err := store.Verify(ctx, "resource-1", "object")
+	if !errors.Is(err, ErrBlobObjectCorrupt) {
+		t.Fatalf("Verify(corrupt) error = %v, want ErrBlobObjectCorrupt", err)
+	}
+	if report == nil || report.Status != models.BlobIntegrityCorrupt || report.ExpectedSHA256 != object.SHA256 || report.ObservedSHA256 != blobDigest([]byte("payloAd")) || report.ObservedSize != int64(len("payloAd")) {
+		t.Fatalf("Verify(corrupt) report = %#v, want bounded checksum evidence", report)
+	}
+	if _, _, err := store.Get(ctx, "resource-1", "object"); !errors.Is(err, ErrBlobObjectCorrupt) {
+		t.Fatalf("Get(corrupt) error = %v, want ErrBlobObjectCorrupt", err)
+	}
+
+	recovered, err := store.Recover(ctx, "resource-1", "object", object.SHA256, trusted)
+	if err != nil {
+		t.Fatalf("Recover() error = %v", err)
+	}
+	if recovered == nil || recovered.SHA256 != object.SHA256 {
+		t.Fatalf("Recover() object = %#v, want original checksum", recovered)
+	}
+	got, content, err := store.Get(ctx, "resource-1", "object")
+	if err != nil || got == nil || !bytes.Equal(content, trusted) {
+		t.Fatalf("Get(after recovery) = %#v, %q, %v; want trusted content", got, content, err)
+	}
+	if repeated, err := store.Recover(ctx, "resource-1", "object", object.SHA256, trusted); err != nil || repeated == nil {
+		t.Fatalf("repeated Recover() = %#v, %v; want idempotent success", repeated, err)
+	}
+
+	reopened, err := NewFileBlobStore(root, 64)
+	if err != nil {
+		t.Fatalf("NewFileBlobStore(reopen) error = %v", err)
+	}
+	if _, content, err := reopened.Get(ctx, "resource-1", "object"); err != nil || !bytes.Equal(content, trusted) {
+		t.Fatalf("Get(after restart) = %q, %v; want trusted content", content, err)
+	}
+}
+
+func TestFileBlobStoreRejectsRecoveryChecksumMismatchAndReportsMetadataTampering(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store, err := NewFileBlobStore(root, 64)
+	if err != nil {
+		t.Fatalf("NewFileBlobStore() error = %v", err)
+	}
+	trusted := []byte("payload")
+	object := putBlob(t, store, "resource-1", "object", trusted)
+	metadataPath := filepath.Join(root, "metadata.json")
+	metadata, err := os.ReadFile(metadataPath)
+	if err != nil {
+		t.Fatalf("ReadFile(metadata) error = %v", err)
+	}
+	metadata = bytes.Replace(metadata, []byte(`"SHA256": "`+object.SHA256+`"`), []byte(`"SHA256": "`+strings.Repeat("a", 64)+`"`), 1)
+	if err := os.WriteFile(metadataPath, metadata, 0o600); err != nil {
+		t.Fatalf("WriteFile(metadata) error = %v", err)
+	}
+	reopened, err := NewFileBlobStore(root, 64)
+	if err != nil {
+		t.Fatalf("NewFileBlobStore(reopen) error = %v", err)
+	}
+	report, err := reopened.Verify(ctx, "resource-1", "object")
+	if !errors.Is(err, ErrBlobObjectCorrupt) || report == nil || report.ObservedSHA256 != object.SHA256 || report.ExpectedSHA256 != strings.Repeat("a", 64) {
+		t.Fatalf("Verify(metadata tamper) = %#v, %v; want redacted mismatch evidence", report, err)
+	}
+	if _, err := reopened.Recover(ctx, "resource-1", "object", object.SHA256, []byte("wrong")); !errors.Is(err, ErrBlobRecoveryChecksumMismatch) {
+		t.Fatalf("Recover(checksum mismatch) error = %v, want ErrBlobRecoveryChecksumMismatch", err)
+	}
+	if _, _, err := reopened.Get(ctx, "resource-1", "object"); !errors.Is(err, ErrBlobObjectCorrupt) {
+		t.Fatalf("Get(after rejected recovery) error = %v, want ErrBlobObjectCorrupt", err)
+	}
+}
