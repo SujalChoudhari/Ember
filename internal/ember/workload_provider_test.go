@@ -130,6 +130,7 @@ func TestWorkloadProviderEnforcesResourceBounds(t *testing.T) {
 	provider, err := NewMemoryWorkloadProviderWithLimits(WorkloadResourceLimits{
 		MaxCPUMillis:   2000,
 		MaxMemoryBytes: 512 << 20,
+		MaxDiskBytes:   2 << 30,
 	})
 	if err != nil {
 		t.Fatalf("NewMemoryWorkloadProviderWithLimits() error = %v", err)
@@ -629,5 +630,94 @@ func TestWorkloadProviderBoundaryRedactsProviderLogs(t *testing.T) {
 	}
 	if len(logs) != 1 || logs[0].Message != "[redacted]" || logs[0].ExecutionID != "execution-safe" {
 		t.Fatalf("GetWorkloadLogs() = %#v, want redacted bounded log", logs)
+	}
+}
+
+func TestWorkloadProviderEnforcesRuntimeAndVolumeDiskBounds(t *testing.T) {
+	ctx := context.Background()
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	metadata := workloadProviderMetadata("v7")
+	provider, err := NewMemoryWorkloadProviderWithLimits(WorkloadResourceLimits{
+		MaxCPUMillis:   2000,
+		MaxMemoryBytes: 512 << 20,
+		MaxDiskBytes:   2048,
+	})
+	if err != nil {
+		t.Fatalf("NewMemoryWorkloadProviderWithLimits() error = %v", err)
+	}
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+
+	workloadSpec := workloadResourceSpec(root.ID, "disk-bounded", metadata)
+	workloadSpec.WorkloadResources.DiskBytes = 1024
+	created, err := manager.CreateWorkload(ctx, root.ID, workloadSpec)
+	if err != nil {
+		t.Fatalf("CreateWorkload(within disk limit) error = %v", err)
+	}
+	if created.Status.ObservedState != models.ResourceStateReady {
+		t.Fatalf("within-disk status = %#v, want ready", created.Status)
+	}
+
+	tooLarge := workloadResourceSpec(root.ID, "runtime-too-large", metadata)
+	tooLarge.WorkloadResources.DiskBytes = 4096
+	rejected, err := manager.CreateWorkload(ctx, root.ID, tooLarge)
+	if !errors.Is(err, ErrWorkloadResourceLimit) {
+		t.Fatalf("CreateWorkload(over runtime disk limit) error = %v, want ErrWorkloadResourceLimit", err)
+	}
+	if rejected == nil || rejected.Status.ObservedState != models.ResourceStateFailed {
+		t.Fatalf("over-runtime response = %#v, want inspectable failed status", rejected)
+	}
+	inspected, err := manager.GetWorkload(ctx, root.ID, rejected.Resource.ID)
+	if err != nil {
+		t.Fatalf("GetWorkload(over runtime disk limit) error = %v", err)
+	}
+	if inspected.Status.Reason != "workload resource limit exceeded" {
+		t.Fatalf("inspected runtime failure reason = %q, want stable reason", inspected.Status.Reason)
+	}
+
+	if _, err := manager.AttachWorkloadVolume(ctx, root.ID, created.Resource.ID, "cache", 1024); err != nil {
+		t.Fatalf("AttachWorkloadVolume(within total disk limit) error = %v", err)
+	}
+	if _, err := manager.AttachWorkloadVolume(ctx, root.ID, created.Resource.ID, "logs", 1024); !errors.Is(err, ErrWorkloadResourceLimit) {
+		t.Fatalf("AttachWorkloadVolume(over total disk limit) error = %v, want ErrWorkloadResourceLimit", err)
+	}
+	volumeFailure, err := manager.GetWorkload(ctx, root.ID, created.Resource.ID)
+	if err != nil {
+		t.Fatalf("GetWorkload(after volume limit) error = %v", err)
+	}
+	if volumeFailure.Status.ObservedState != models.ResourceStateFailed || volumeFailure.Status.Reason != "workload resource limit exceeded" {
+		t.Fatalf("workload after volume limit = %#v, want inspectable stable failure", volumeFailure.Status)
+	}
+	volumes, err := manager.ListWorkloadVolumes(ctx, root.ID, created.Resource.ID, MaxWorkloadVolumeRecords)
+	if err != nil {
+		t.Fatalf("ListWorkloadVolumes(after rejected attach) error = %v", err)
+	}
+	if len(volumes) != 1 || volumes[0].Name != "cache" {
+		t.Fatalf("volumes after rejected attach = %#v, want only cache", volumes)
+	}
+	if err := manager.CleanupWorkloadVolumes(ctx, root.ID, created.Resource.ID); err != nil {
+		t.Fatalf("CleanupWorkloadVolumes() error = %v", err)
+	}
+	if err := manager.CleanupWorkloadVolumes(ctx, root.ID, created.Resource.ID); err != nil {
+		t.Fatalf("CleanupWorkloadVolumes(repeat) error = %v, want idempotent cleanup", err)
+	}
+	if _, err := manager.AttachWorkloadVolume(ctx, root.ID, created.Resource.ID, "logs", 1024); err != nil {
+		t.Fatalf("AttachWorkloadVolume(after cleanup) error = %v, want released bound", err)
 	}
 }

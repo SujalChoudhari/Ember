@@ -79,6 +79,7 @@ const (
 	MaxWorkloadReasonLength      = 256
 	MaxWorkloadCPUMillis         = 64_000
 	MaxWorkloadMemoryBytes       = 1 << 40
+	MaxWorkloadDiskBytes         = 1 << 40
 )
 
 func (metadata ProviderMetadata) valid() bool {
@@ -150,10 +151,12 @@ type ResourceSpec struct {
 }
 
 // WorkloadResources contains bounded resource requirements for a workload.
-// CPU is expressed in millicores and memory in bytes; zero means unspecified.
+// CPU is expressed in millicores and memory/disk in bytes; zero means
+// unspecified.
 type WorkloadResources struct {
 	CPUMillis   int64
 	MemoryBytes int64
+	DiskBytes   int64
 }
 
 // WorkloadSecurityContext describes the supported workload execution
@@ -167,7 +170,8 @@ var ErrInvalidWorkloadResources = errors.New("invalid workload resources")
 
 func (resources WorkloadResources) Validate() error {
 	if resources.CPUMillis < 0 || resources.CPUMillis > MaxWorkloadCPUMillis ||
-		resources.MemoryBytes < 0 || resources.MemoryBytes > MaxWorkloadMemoryBytes {
+		resources.MemoryBytes < 0 || resources.MemoryBytes > MaxWorkloadMemoryBytes ||
+		resources.DiskBytes < 0 || resources.DiskBytes > MaxWorkloadDiskBytes {
 		return ErrInvalidWorkloadResources
 	}
 	return nil

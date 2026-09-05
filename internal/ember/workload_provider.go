@@ -80,11 +80,13 @@ type WorkloadProviderRegistry struct {
 type WorkloadResourceLimits struct {
 	MaxCPUMillis   int64
 	MaxMemoryBytes int64
+	MaxDiskBytes   int64
 }
 
 func (limits WorkloadResourceLimits) Validate() error {
 	if limits.MaxCPUMillis <= 0 || limits.MaxCPUMillis > models.MaxWorkloadCPUMillis ||
-		limits.MaxMemoryBytes <= 0 || limits.MaxMemoryBytes > models.MaxWorkloadMemoryBytes {
+		limits.MaxMemoryBytes <= 0 || limits.MaxMemoryBytes > models.MaxWorkloadMemoryBytes ||
+		limits.MaxDiskBytes <= 0 || limits.MaxDiskBytes > models.MaxWorkloadDiskBytes {
 		return ErrInvalidWorkloadProvider
 	}
 	return nil
@@ -537,6 +539,7 @@ func NewMemoryWorkloadProvider() *MemoryWorkloadProvider {
 	provider, _ := NewMemoryWorkloadProviderWithLimits(WorkloadResourceLimits{
 		MaxCPUMillis:   models.MaxWorkloadCPUMillis,
 		MaxMemoryBytes: models.MaxWorkloadMemoryBytes,
+		MaxDiskBytes:   models.MaxWorkloadDiskBytes,
 	})
 	return provider
 }
@@ -596,7 +599,22 @@ func memoryWorkloadStatus(resource models.Resource) models.WorkloadStatus {
 
 func (provider *MemoryWorkloadProvider) withinResourceLimits(resources models.WorkloadResources) bool {
 	return (resources.CPUMillis == 0 || resources.CPUMillis <= provider.limits.MaxCPUMillis) &&
-		(resources.MemoryBytes == 0 || resources.MemoryBytes <= provider.limits.MaxMemoryBytes)
+		(resources.MemoryBytes == 0 || resources.MemoryBytes <= provider.limits.MaxMemoryBytes) &&
+		(resources.DiskBytes == 0 || resources.DiskBytes <= provider.limits.MaxDiskBytes)
+}
+
+func (provider *MemoryWorkloadProvider) withinVolumeDiskLimit(resource models.Resource, maxBytes int64) bool {
+	remaining := provider.limits.MaxDiskBytes - resource.Spec.WorkloadResources.DiskBytes
+	if remaining < 0 || maxBytes > remaining {
+		return false
+	}
+	for _, volume := range provider.volumes[resource.ID] {
+		if volume.MaxBytes > remaining-maxBytes {
+			return false
+		}
+		remaining -= volume.MaxBytes
+	}
+	return true
 }
 
 func workloadResourceLimitStatus(resource models.Resource) models.WorkloadStatus {
@@ -704,6 +722,10 @@ func (provider *MemoryWorkloadProvider) AttachVolume(ctx context.Context, resour
 	defer provider.mu.Unlock()
 	if _, exists := provider.workloads[resource.ID]; !exists {
 		return models.WorkloadVolume{}, errProviderNotFound
+	}
+	if !provider.withinVolumeDiskLimit(resource, maxBytes) {
+		provider.workloads[resource.ID] = workloadResourceLimitStatus(resource)
+		return models.WorkloadVolume{}, errProviderResourceLimit
 	}
 	volumes := provider.volumes[resource.ID]
 	if len(volumes) >= MaxWorkloadVolumeRecords {
