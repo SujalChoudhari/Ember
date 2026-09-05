@@ -250,12 +250,13 @@ func (store *FileResourceStore) Create(ctx context.Context, spec models.Resource
 	resource := models.Resource{
 		ID: id,
 		Spec: models.ResourceSpec{
-			Type:         spec.Type,
-			Name:         spec.Name,
-			ParentID:     spec.ParentID,
-			Tags:         cloneStoredTags(spec.Tags),
-			Provider:     spec.Provider,
-			DesiredState: spec.DesiredState,
+			Type:              spec.Type,
+			Name:              spec.Name,
+			ParentID:          spec.ParentID,
+			Tags:              cloneStoredTags(spec.Tags),
+			Provider:          spec.Provider,
+			DesiredState:      spec.DesiredState,
+			WorkloadResources: spec.WorkloadResources,
 		},
 		ObservedState: models.ResourceStateUnknown,
 	}

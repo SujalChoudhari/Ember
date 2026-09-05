@@ -77,6 +77,8 @@ const (
 	MaxResourceLockTokenLength   = 128
 	MaxWorkloadExecutionIDLength = 128
 	MaxWorkloadReasonLength      = 256
+	MaxWorkloadCPUMillis         = 64_000
+	MaxWorkloadMemoryBytes       = 1 << 40
 )
 
 func (metadata ProviderMetadata) valid() bool {
@@ -137,12 +139,30 @@ func (state ResourceState) valid() bool {
 }
 
 type ResourceSpec struct {
-	Type         ResourceType
-	Name         string
-	ParentID     string
-	Tags         map[string]string
-	Provider     ProviderMetadata
-	DesiredState ResourceState
+	Type              ResourceType
+	Name              string
+	ParentID          string
+	Tags              map[string]string
+	Provider          ProviderMetadata
+	DesiredState      ResourceState
+	WorkloadResources WorkloadResources
+}
+
+// WorkloadResources contains bounded resource requirements for a workload.
+// CPU is expressed in millicores and memory in bytes; zero means unspecified.
+type WorkloadResources struct {
+	CPUMillis   int64
+	MemoryBytes int64
+}
+
+var ErrInvalidWorkloadResources = errors.New("invalid workload resources")
+
+func (resources WorkloadResources) Validate() error {
+	if resources.CPUMillis < 0 || resources.CPUMillis > MaxWorkloadCPUMillis ||
+		resources.MemoryBytes < 0 || resources.MemoryBytes > MaxWorkloadMemoryBytes {
+		return ErrInvalidWorkloadResources
+	}
+	return nil
 }
 
 type Resource struct {
@@ -200,10 +220,13 @@ func (spec ResourceSpec) Validate() error {
 	if !spec.Type.valid() || strings.TrimSpace(spec.Name) == "" || len(spec.Name) > MaxResourceNameLength {
 		return ErrInvalidResourceSpec
 	}
+	if spec.Type != ResourceTypeWorkload && spec.WorkloadResources != (WorkloadResources{}) {
+		return ErrInvalidResourceSpec
+	}
 	if spec.ParentID != "" && (strings.TrimSpace(spec.ParentID) == "" || len(spec.ParentID) > MaxParentIDLength) {
 		return ErrInvalidResourceSpec
 	}
-	if !validTags(spec.Tags) || !spec.Provider.valid() || len(string(spec.DesiredState)) > MaxResourceStateLength || !spec.DesiredState.valid() {
+	if !validTags(spec.Tags) || !spec.Provider.valid() || len(string(spec.DesiredState)) > MaxResourceStateLength || !spec.DesiredState.valid() || spec.WorkloadResources.Validate() != nil {
 		return ErrInvalidResourceSpec
 	}
 	return nil
