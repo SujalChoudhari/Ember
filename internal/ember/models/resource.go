@@ -8,13 +8,14 @@ import (
 type ResourceType string
 
 const (
-	ResourceTypeGroup  ResourceType = "group"
-	ResourceTypeBucket ResourceType = "bucket"
+	ResourceTypeGroup    ResourceType = "group"
+	ResourceTypeBucket   ResourceType = "bucket"
+	ResourceTypeWorkload ResourceType = "workload"
 )
 
 func (resourceType ResourceType) valid() bool {
 	switch resourceType {
-	case ResourceTypeGroup, ResourceTypeBucket:
+	case ResourceTypeGroup, ResourceTypeBucket, ResourceTypeWorkload:
 		return true
 	default:
 		return false
@@ -45,18 +46,20 @@ type ResourceLock struct {
 }
 
 const (
-	MaxResourceIDLength        = 128
-	MaxResourceNameLength      = 128
-	MaxParentIDLength          = 128
-	MaxResourceTagCount        = 32
-	MaxResourceTagKeyLength    = 64
-	MaxResourceTagValueLength  = 256
-	MaxProviderNamespaceLength = 64
-	MaxProviderTypeLength      = 128
-	MaxProviderVersionLength   = 32
-	MaxResourceStateLength     = 32
-	MaxResourceLockOwnerLength = 128
-	MaxResourceLockTokenLength = 128
+	MaxResourceIDLength          = 128
+	MaxResourceNameLength        = 128
+	MaxParentIDLength            = 128
+	MaxResourceTagCount          = 32
+	MaxResourceTagKeyLength      = 64
+	MaxResourceTagValueLength    = 256
+	MaxProviderNamespaceLength   = 64
+	MaxProviderTypeLength        = 128
+	MaxProviderVersionLength     = 32
+	MaxResourceStateLength       = 32
+	MaxResourceLockOwnerLength   = 128
+	MaxResourceLockTokenLength   = 128
+	MaxWorkloadExecutionIDLength = 128
+	MaxWorkloadReasonLength      = 256
 )
 
 func (metadata ProviderMetadata) valid() bool {
@@ -113,10 +116,19 @@ type Resource struct {
 	ObservedState ResourceState
 }
 
+// WorkloadStatus is the stable, value-bounded status returned by a workload
+// provider. It intentionally contains no provider-specific payload or error.
+type WorkloadStatus struct {
+	ObservedState ResourceState
+	Reason        string
+	ExecutionID   string
+}
+
 var (
-	ErrInvalidResourceSpec = errors.New("invalid resource spec")
-	ErrInvalidResource     = errors.New("invalid resource")
-	ErrInvalidResourceLock = errors.New("invalid resource lock")
+	ErrInvalidResourceSpec   = errors.New("invalid resource spec")
+	ErrInvalidResource       = errors.New("invalid resource")
+	ErrInvalidResourceLock   = errors.New("invalid resource lock")
+	ErrInvalidWorkloadStatus = errors.New("invalid workload status")
 )
 
 func (spec ResourceSpec) Validate() error {
@@ -137,6 +149,14 @@ func (resource Resource) Validate() error {
 		resource.Spec.Validate() != nil || len(string(resource.ObservedState)) > MaxResourceStateLength ||
 		!resource.ObservedState.valid() {
 		return ErrInvalidResource
+	}
+	return nil
+}
+
+func (status WorkloadStatus) Validate() error {
+	if !status.ObservedState.valid() || !validOptionalBoundedText(status.Reason, MaxWorkloadReasonLength) ||
+		!validOptionalBoundedText(status.ExecutionID, MaxWorkloadExecutionIDLength) {
+		return ErrInvalidWorkloadStatus
 	}
 	return nil
 }
