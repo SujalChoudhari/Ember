@@ -14,6 +14,7 @@ import (
 
 const MaxWorkloadProviderRecords = 100
 const MaxWorkloadLogRecords = 100
+const MaxWorkloadVolumeRecords = 100
 
 var (
 	ErrInvalidWorkloadControlPlane   = errors.New("invalid workload control plane")
@@ -28,10 +29,15 @@ var (
 	ErrInvalidWorkloadProviderStatus = errors.New("invalid workload provider status")
 	ErrInvalidWorkloadLogLimit       = errors.New("invalid workload log limit")
 	ErrInvalidWorkloadProviderLog    = errors.New("invalid workload provider log")
+	ErrInvalidWorkloadVolume         = errors.New("invalid workload volume")
+	ErrInvalidWorkloadVolumeLimit    = errors.New("invalid workload volume limit")
+	ErrDuplicateWorkloadVolume       = errors.New("duplicate workload volume")
 
 	errProviderOperationUnsupported = errors.New("provider operation unsupported")
 	errProviderNotFound             = errors.New("provider workload not found")
 	errProviderConflict             = errors.New("provider workload conflict")
+	errProviderInvalidVolume        = errors.New("provider volume invalid")
+	errProviderDuplicateVolume      = errors.New("provider volume duplicate")
 )
 
 // WorkloadProvider is the execution boundary for a workload resource. The
@@ -50,6 +56,14 @@ type WorkloadLogProvider interface {
 
 type WorkloadRestartProvider interface {
 	Restart(context.Context, models.Resource) (models.WorkloadStatus, error)
+}
+
+// WorkloadVolumeProvider owns only bounded volume metadata for a workload.
+// Volume payload storage is deliberately outside this provider contract.
+type WorkloadVolumeProvider interface {
+	AttachVolume(context.Context, models.Resource, string, int64) (models.WorkloadVolume, error)
+	ListVolumes(context.Context, models.Resource, int) ([]models.WorkloadVolume, error)
+	CleanupVolumes(context.Context, models.Resource) error
 }
 
 // WorkloadProviderRegistry holds the bounded provider registrations used by
@@ -116,6 +130,9 @@ type WorkloadControlPlane interface {
 	UpdateWorkload(context.Context, string, string) (*WorkloadView, error)
 	RestartWorkload(context.Context, string, string) (*WorkloadView, error)
 	GetWorkloadLogs(context.Context, string, string, int) ([]models.WorkloadLog, error)
+	AttachWorkloadVolume(context.Context, string, string, string, int64) (*models.WorkloadVolume, error)
+	ListWorkloadVolumes(context.Context, string, string, int) ([]models.WorkloadVolume, error)
+	CleanupWorkloadVolumes(context.Context, string, string) error
 	DeleteWorkload(context.Context, string, string) error
 }
 
@@ -329,6 +346,111 @@ func (manager *WorkloadManager) GetWorkloadLogs(ctx context.Context, scopeID, re
 	return safeLogs, nil
 }
 
+func validateWorkloadVolumeRequest(name string, maxBytes int64) error {
+	if strings.TrimSpace(name) == "" || len(name) > models.MaxWorkloadVolumeNameLength ||
+		maxBytes <= 0 || maxBytes > models.MaxWorkloadVolumeBytes {
+		return ErrInvalidWorkloadVolume
+	}
+	return nil
+}
+
+func validateOwnedWorkloadVolume(volume models.WorkloadVolume, workloadID string) error {
+	if volume.WorkloadID != workloadID || volume.Validate() != nil {
+		return ErrInvalidWorkloadVolume
+	}
+	return nil
+}
+
+func (manager *WorkloadManager) resolveWorkloadVolumeProvider(ctx context.Context, scopeID, resourceID string) (*models.Resource, WorkloadVolumeProvider, error) {
+	if err := validateWorkloadLookup(ctx, scopeID, resourceID); err != nil {
+		return nil, nil, err
+	}
+	resource, err := manager.resources.GetResource(ctx, scopeID, resourceID)
+	if errors.Is(err, persistence.ErrResourceNotFound) {
+		return nil, nil, ErrWorkloadNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if resource.Spec.Type != models.ResourceTypeWorkload {
+		return nil, nil, ErrWorkloadNotFound
+	}
+	provider, err := manager.registry.Resolve(resource.Spec.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	volumeProvider, ok := provider.(WorkloadVolumeProvider)
+	if !ok {
+		return nil, nil, ErrWorkloadProviderUnsupported
+	}
+	return resource, volumeProvider, nil
+}
+
+func (manager *WorkloadManager) AttachWorkloadVolume(ctx context.Context, scopeID, resourceID, name string, maxBytes int64) (*models.WorkloadVolume, error) {
+	if err := validateWorkloadVolumeRequest(name, maxBytes); err != nil {
+		return nil, err
+	}
+	resource, provider, err := manager.resolveWorkloadVolumeProvider(ctx, scopeID, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	volume, providerErr := provider.AttachVolume(ctx, *resource, name, maxBytes)
+	if providerErr != nil {
+		if errors.Is(providerErr, errProviderNotFound) {
+			return nil, ErrWorkloadNotFound
+		}
+		if errors.Is(providerErr, errProviderInvalidVolume) {
+			return nil, ErrInvalidWorkloadVolume
+		}
+		return nil, mapWorkloadProviderError(providerErr)
+	}
+	if err := validateOwnedWorkloadVolume(volume, resource.ID); err != nil {
+		return nil, err
+	}
+	return &volume, nil
+}
+
+func (manager *WorkloadManager) ListWorkloadVolumes(ctx context.Context, scopeID, resourceID string, limit int) ([]models.WorkloadVolume, error) {
+	if limit <= 0 || limit > MaxWorkloadVolumeRecords {
+		return nil, ErrInvalidWorkloadVolumeLimit
+	}
+	resource, provider, err := manager.resolveWorkloadVolumeProvider(ctx, scopeID, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	volumes, providerErr := provider.ListVolumes(ctx, *resource, limit)
+	if providerErr != nil {
+		if errors.Is(providerErr, errProviderNotFound) {
+			return nil, ErrWorkloadNotFound
+		}
+		return nil, mapWorkloadProviderError(providerErr)
+	}
+	if len(volumes) > limit {
+		volumes = volumes[:limit]
+	}
+	for _, volume := range volumes {
+		if err := validateOwnedWorkloadVolume(volume, resource.ID); err != nil {
+			return nil, err
+		}
+	}
+	return volumes, nil
+}
+
+func (manager *WorkloadManager) CleanupWorkloadVolumes(ctx context.Context, scopeID, resourceID string) error {
+	resource, provider, err := manager.resolveWorkloadVolumeProvider(ctx, scopeID, resourceID)
+	if err != nil {
+		return err
+	}
+	providerErr := provider.CleanupVolumes(ctx, *resource)
+	if providerErr == nil {
+		return nil
+	}
+	if errors.Is(providerErr, errProviderNotFound) {
+		return ErrWorkloadNotFound
+	}
+	return mapWorkloadProviderError(providerErr)
+}
+
 func newWorkloadView(resource models.Resource, status models.WorkloadStatus) (*WorkloadView, error) {
 	if err := status.Validate(); err != nil {
 		return nil, ErrInvalidWorkloadProviderStatus
@@ -363,6 +485,8 @@ func mapWorkloadProviderError(err error) error {
 		return ErrWorkloadNotFound
 	case errors.Is(err, errProviderConflict):
 		return ErrWorkloadProviderOperation
+	case errors.Is(err, errProviderDuplicateVolume):
+		return ErrDuplicateWorkloadVolume
 	default:
 		return ErrWorkloadProviderOperation
 	}
@@ -371,10 +495,12 @@ func mapWorkloadProviderError(err error) error {
 // MemoryWorkloadProvider is a bounded provider fixture and local execution
 // implementation. It stores only safe status metadata, never payloads.
 type MemoryWorkloadProvider struct {
-	mu        sync.RWMutex
-	workloads map[string]models.WorkloadStatus
-	logs      map[string][]models.WorkloadLog
-	restarts  map[string]uint64
+	mu           sync.RWMutex
+	workloads    map[string]models.WorkloadStatus
+	logs         map[string][]models.WorkloadLog
+	restarts     map[string]uint64
+	volumes      map[string][]models.WorkloadVolume
+	nextVolumeID uint64
 }
 
 func NewMemoryWorkloadProvider() *MemoryWorkloadProvider {
@@ -382,6 +508,7 @@ func NewMemoryWorkloadProvider() *MemoryWorkloadProvider {
 		workloads: make(map[string]models.WorkloadStatus),
 		logs:      make(map[string][]models.WorkloadLog),
 		restarts:  make(map[string]uint64),
+		volumes:   make(map[string][]models.WorkloadVolume),
 	}
 }
 
@@ -490,6 +617,90 @@ func (provider *MemoryWorkloadProvider) appendLogLocked(resourceID string, log m
 	provider.logs[resourceID] = logs
 }
 
+func (provider *MemoryWorkloadProvider) AttachVolume(ctx context.Context, resource models.Resource, name string, maxBytes int64) (models.WorkloadVolume, error) {
+	if err := ctx.Err(); err != nil {
+		return models.WorkloadVolume{}, err
+	}
+	if err := validateProviderResource(resource); err != nil {
+		return models.WorkloadVolume{}, errProviderOperationUnsupported
+	}
+	if validateWorkloadVolumeRequest(name, maxBytes) != nil {
+		return models.WorkloadVolume{}, errProviderInvalidVolume
+	}
+
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if _, exists := provider.workloads[resource.ID]; !exists {
+		return models.WorkloadVolume{}, errProviderNotFound
+	}
+	volumes := provider.volumes[resource.ID]
+	if len(volumes) >= MaxWorkloadVolumeRecords {
+		return models.WorkloadVolume{}, errProviderConflict
+	}
+	for _, volume := range volumes {
+		if volume.Name == name {
+			return models.WorkloadVolume{}, errProviderDuplicateVolume
+		}
+	}
+	if provider.nextVolumeID == ^uint64(0) {
+		return models.WorkloadVolume{}, errProviderConflict
+	}
+	provider.nextVolumeID++
+	volume := models.WorkloadVolume{
+		ID:         fmt.Sprintf("volume-%08d", provider.nextVolumeID),
+		WorkloadID: resource.ID,
+		Name:       name,
+		Path:       fmt.Sprintf("workloads/%s/volumes/volume-%08d", resource.ID, provider.nextVolumeID),
+		MaxBytes:   maxBytes,
+	}
+	if err := volume.Validate(); err != nil {
+		provider.nextVolumeID--
+		return models.WorkloadVolume{}, errProviderInvalidVolume
+	}
+	provider.volumes[resource.ID] = append(volumes, volume)
+	return volume, nil
+}
+
+func (provider *MemoryWorkloadProvider) ListVolumes(ctx context.Context, resource models.Resource, limit int) ([]models.WorkloadVolume, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateProviderResource(resource); err != nil {
+		return nil, errProviderOperationUnsupported
+	}
+	if limit <= 0 || limit > MaxWorkloadVolumeRecords {
+		return nil, errProviderOperationUnsupported
+	}
+
+	provider.mu.RLock()
+	defer provider.mu.RUnlock()
+	if _, exists := provider.workloads[resource.ID]; !exists {
+		return nil, errProviderNotFound
+	}
+	volumes := provider.volumes[resource.ID]
+	if len(volumes) > limit {
+		volumes = volumes[:limit]
+	}
+	return append([]models.WorkloadVolume(nil), volumes...), nil
+}
+
+func (provider *MemoryWorkloadProvider) CleanupVolumes(ctx context.Context, resource models.Resource) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateProviderResource(resource); err != nil {
+		return errProviderOperationUnsupported
+	}
+
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if _, exists := provider.workloads[resource.ID]; !exists {
+		return errProviderNotFound
+	}
+	delete(provider.volumes, resource.ID)
+	return nil
+}
+
 func (provider *MemoryWorkloadProvider) Get(ctx context.Context, resource models.Resource) (models.WorkloadStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return models.WorkloadStatus{}, err
@@ -538,10 +749,12 @@ func (provider *MemoryWorkloadProvider) Delete(ctx context.Context, resource mod
 	delete(provider.workloads, resource.ID)
 	delete(provider.logs, resource.ID)
 	delete(provider.restarts, resource.ID)
+	delete(provider.volumes, resource.ID)
 	return nil
 }
 
 var _ WorkloadProvider = (*MemoryWorkloadProvider)(nil)
 var _ WorkloadLogProvider = (*MemoryWorkloadProvider)(nil)
 var _ WorkloadRestartProvider = (*MemoryWorkloadProvider)(nil)
+var _ WorkloadVolumeProvider = (*MemoryWorkloadProvider)(nil)
 var _ WorkloadControlPlane = (*WorkloadManager)(nil)
