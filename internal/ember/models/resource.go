@@ -45,6 +45,22 @@ type ResourceLock struct {
 	Token string
 }
 
+type WorkloadHealth string
+
+const (
+	WorkloadHealthUnknown   WorkloadHealth = "unknown"
+	WorkloadHealthHealthy   WorkloadHealth = "healthy"
+	WorkloadHealthUnhealthy WorkloadHealth = "unhealthy"
+)
+
+type WorkloadReadiness string
+
+const (
+	WorkloadReadinessUnknown  WorkloadReadiness = "unknown"
+	WorkloadReadinessReady    WorkloadReadiness = "ready"
+	WorkloadReadinessNotReady WorkloadReadiness = "not-ready"
+)
+
 const (
 	MaxResourceIDLength          = 128
 	MaxResourceNameLength        = 128
@@ -78,6 +94,24 @@ func (lock ResourceLock) Validate() error {
 		return ErrInvalidResourceLock
 	}
 	return nil
+}
+
+func (health WorkloadHealth) valid() bool {
+	switch health {
+	case "", WorkloadHealthUnknown, WorkloadHealthHealthy, WorkloadHealthUnhealthy:
+		return true
+	default:
+		return false
+	}
+}
+
+func (readiness WorkloadReadiness) valid() bool {
+	switch readiness {
+	case "", WorkloadReadinessUnknown, WorkloadReadinessReady, WorkloadReadinessNotReady:
+		return true
+	default:
+		return false
+	}
 }
 
 func validTags(tags map[string]string) bool {
@@ -120,6 +154,8 @@ type Resource struct {
 // provider. It intentionally contains no provider-specific payload or error.
 type WorkloadStatus struct {
 	ObservedState ResourceState
+	Health        WorkloadHealth
+	Readiness     WorkloadReadiness
 	Reason        string
 	ExecutionID   string
 }
@@ -154,7 +190,8 @@ func (resource Resource) Validate() error {
 }
 
 func (status WorkloadStatus) Validate() error {
-	if !status.ObservedState.valid() || !validOptionalBoundedText(status.Reason, MaxWorkloadReasonLength) ||
+	if !status.ObservedState.valid() || !status.Health.valid() || !status.Readiness.valid() ||
+		!validOptionalBoundedText(status.Reason, MaxWorkloadReasonLength) ||
 		!validOptionalBoundedText(status.ExecutionID, MaxWorkloadExecutionIDLength) {
 		return ErrInvalidWorkloadStatus
 	}

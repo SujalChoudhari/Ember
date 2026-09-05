@@ -245,8 +245,26 @@ func newWorkloadView(resource models.Resource, status models.WorkloadStatus) (*W
 	if err := status.Validate(); err != nil {
 		return nil, ErrInvalidWorkloadProviderStatus
 	}
+	if status.Health == "" {
+		status.Health = models.WorkloadHealthUnknown
+	}
+	if status.Readiness == "" {
+		status.Readiness = models.WorkloadReadinessUnknown
+	}
+	status.Reason = redactWorkloadStatusValue(status.Reason)
+	status.ExecutionID = redactWorkloadStatusValue(status.ExecutionID)
 	resource.ObservedState = status.ObservedState
 	return &WorkloadView{Resource: resource, Status: status}, nil
+}
+
+func redactWorkloadStatusValue(value string) string {
+	lowerValue := strings.ToLower(value)
+	for _, marker := range []string{"secret", "password", "token", "credential", "authorization", "bearer", "api-key", "apikey"} {
+		if strings.Contains(lowerValue, marker) {
+			return "[redacted]"
+		}
+	}
+	return value
 }
 
 func mapWorkloadProviderError(err error) error {
@@ -285,8 +303,19 @@ func memoryWorkloadStatus(resource models.Resource) models.WorkloadStatus {
 	if state == "" {
 		state = models.ResourceStatePending
 	}
+	health := models.WorkloadHealthUnknown
+	readiness := models.WorkloadReadinessNotReady
+	switch state {
+	case models.ResourceStateReady:
+		health = models.WorkloadHealthHealthy
+		readiness = models.WorkloadReadinessReady
+	case models.ResourceStateFailed, models.ResourceStateDeleting:
+		health = models.WorkloadHealthUnhealthy
+	}
 	return models.WorkloadStatus{
 		ObservedState: state,
+		Health:        health,
+		Readiness:     readiness,
 		Reason:        "provider accepted desired state",
 		ExecutionID:   "memory:" + resource.ID,
 	}
