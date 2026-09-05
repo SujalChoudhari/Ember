@@ -3,6 +3,8 @@ package ember
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -221,4 +223,34 @@ func TestCLIExposesCompleteBlobLifecycle(t *testing.T) {
 	if _, err := runOperatorCLIResult(t, operator, "blob", "delete", "--scope", other.ID, "--bucket", bucket.ID, "--key", "z.txt"); !errors.Is(err, ErrOperatorScopeDenied) {
 		t.Fatalf("CLI blob delete cross-scope error = %v, want scope denial", err)
 	}
+}
+
+func TestCLIExposesBoundedBlobIntegrityAndAuditedRecovery(t *testing.T) {
+	operator := newTestOperator(t)
+	group := runOperatorCLI(t, operator, "resource", "create", "--type", "group", "--name", "platform").Resource
+	bucket := runOperatorCLI(t, operator, "resource", "create", "--scope", group.ID, "--parent", group.ID, "--type", "bucket", "--name", "assets").Resource
+	data := "trusted payload"
+	put := runOperatorCLI(t, operator, "blob", "put", "--scope", group.ID, "--bucket", bucket.ID, "--key", "object", "--data", data)
+
+	verified := runOperatorCLI(t, operator, "blob", "verify", "--scope", group.ID, "--bucket", bucket.ID, "--key", "object")
+	if verified.Integrity == nil || verified.Integrity.Status != "verified" || verified.Integrity.ObservedSHA256 != put.Object.SHA256 || verified.Integrity.ObservedSize != int64(len(data)) {
+		t.Fatalf("CLI blob verify response = %#v, want bounded verified report", verified)
+	}
+	recovered := runOperatorCLI(t, operator, "blob", "recover", "--scope", group.ID, "--bucket", bucket.ID, "--key", "object", "--expected-sha256", cliBlobDigest(data), "--data", data, "--request-id", "request-blob-recovery", "--correlation-id", "correlation-blob-recovery")
+	if recovered.Object == nil || recovered.Operation == nil || recovered.Operation.ResourceID != bucket.ID || recovered.Replayed {
+		t.Fatalf("CLI blob recovery response = %#v, want audited operation and object", recovered)
+	}
+	replayed := runOperatorCLI(t, operator, "blob", "recover", "--scope", group.ID, "--bucket", bucket.ID, "--key", "object", "--expected-sha256", cliBlobDigest(data), "--data", "different", "--request-id", "request-blob-recovery", "--correlation-id", "correlation-blob-recovery-replay")
+	if replayed.Operation == nil || !replayed.Replayed || replayed.Operation.ID != recovered.Operation.ID || replayed.Object == nil || replayed.Object.SHA256 != put.Object.SHA256 {
+		t.Fatalf("CLI blob recovery replay = %#v, want idempotent operation", replayed)
+	}
+	audit := runOperatorCLI(t, operator, "audit", "list", "--scope", group.ID, "--resource", bucket.ID, "--limit", "10")
+	if len(audit.Audit) != 1 || audit.Audit[0].Action != "blob.recover" || audit.Audit[0].OperationID != recovered.Operation.ID {
+		t.Fatalf("CLI blob recovery audit = %#v, want one bounded recovery entry", audit)
+	}
+}
+
+func cliBlobDigest(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
 }

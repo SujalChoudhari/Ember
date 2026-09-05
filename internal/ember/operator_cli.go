@@ -66,6 +66,10 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 			return runCLIPutBlob(ctx, operator, args[2:], output)
 		case "get":
 			return runCLIGetBlob(ctx, operator, args[2:], output)
+		case "verify":
+			return runCLIVerifyBlob(ctx, operator, args[2:], output)
+		case "recover":
+			return runCLIRecoverBlob(ctx, operator, args[2:], output)
 		case "list":
 			return runCLIListBlobs(ctx, operator, args[2:], output)
 		case "delete":
@@ -437,6 +441,42 @@ func runCLIGetBlob(ctx context.Context, operator *Operator, args []string, outpu
 		return writeCLIResponse(output, response)
 	}
 	response, err := operator.GetBlob(ctx, principal, *bucketID, *objectKey)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, response)
+}
+
+func runCLIVerifyBlob(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("blob verify")
+	scopeID := set.String("scope", "", "operator scope")
+	bucketID := set.String("bucket", "", "bucket resource ID")
+	objectKey := set.String("key", "", "object key")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	response, err := operator.VerifyBlob(ctx, OperatorPrincipal{ScopeID: *scopeID}, *bucketID, *objectKey)
+	if response != nil {
+		if writeErr := writeCLIResponse(output, response); writeErr != nil {
+			return writeErr
+		}
+	}
+	return err
+}
+
+func runCLIRecoverBlob(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("blob recover")
+	scopeID := set.String("scope", "", "operator scope")
+	bucketID := set.String("bucket", "", "bucket resource ID")
+	objectKey := set.String("key", "", "object key")
+	expectedSHA256 := set.String("expected-sha256", "", "trusted content checksum")
+	data := set.String("data", "", "trusted object content")
+	requestID := set.String("request-id", "", "idempotency request ID")
+	correlationID := set.String("correlation-id", "", "correlation ID")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	response, err := operator.RecoverBlob(ctx, OperatorPrincipal{ScopeID: *scopeID}, *bucketID, *objectKey, *expectedSHA256, []byte(*data), *requestID, *correlationID)
 	if err != nil {
 		return err
 	}

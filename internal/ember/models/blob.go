@@ -28,6 +28,25 @@ type BlobObject struct {
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
+type BlobIntegrityStatus string
+
+const (
+	BlobIntegrityVerified BlobIntegrityStatus = "verified"
+	BlobIntegrityCorrupt  BlobIntegrityStatus = "corrupt"
+)
+
+// BlobIntegrityReport contains bounded, payload-free evidence from one
+// checksum inspection.
+type BlobIntegrityReport struct {
+	BucketID       string              `json:"bucket_id"`
+	Key            string              `json:"key"`
+	ExpectedSHA256 string              `json:"expected_sha256"`
+	ObservedSHA256 string              `json:"observed_sha256,omitempty"`
+	ExpectedSize   int64               `json:"expected_size"`
+	ObservedSize   int64               `json:"observed_size"`
+	Status         BlobIntegrityStatus `json:"status"`
+}
+
 var (
 	ErrInvalidBlobObject    = errors.New("invalid blob object")
 	ErrInvalidBlobBucketID  = errors.New("invalid blob bucket ID")
