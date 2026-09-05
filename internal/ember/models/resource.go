@@ -168,12 +168,32 @@ type WorkloadLog struct {
 	ExecutionID string
 }
 
+// WorkloadVolume describes bounded, provider-owned volume metadata. The path is
+// an opaque ownership path; volume payload bytes are intentionally outside the
+// workload control-plane contract.
+type WorkloadVolume struct {
+	ID         string
+	WorkloadID string
+	Name       string
+	Path       string
+	MaxBytes   int64
+	UsedBytes  int64
+}
+
+const (
+	MaxWorkloadVolumeIDLength   = 128
+	MaxWorkloadVolumeNameLength = 128
+	MaxWorkloadVolumePathLength = 512
+	MaxWorkloadVolumeBytes      = 1 << 30
+)
+
 var (
 	ErrInvalidResourceSpec   = errors.New("invalid resource spec")
 	ErrInvalidResource       = errors.New("invalid resource")
 	ErrInvalidResourceLock   = errors.New("invalid resource lock")
 	ErrInvalidWorkloadStatus = errors.New("invalid workload status")
 	ErrInvalidWorkloadLog    = errors.New("invalid workload log")
+	ErrInvalidWorkloadVolume = errors.New("invalid workload volume")
 )
 
 func (spec ResourceSpec) Validate() error {
@@ -194,6 +214,18 @@ func (resource Resource) Validate() error {
 		resource.Spec.Validate() != nil || len(string(resource.ObservedState)) > MaxResourceStateLength ||
 		!resource.ObservedState.valid() {
 		return ErrInvalidResource
+	}
+	return nil
+}
+
+func (volume WorkloadVolume) Validate() error {
+	if strings.TrimSpace(volume.ID) == "" || len(volume.ID) > MaxWorkloadVolumeIDLength ||
+		strings.TrimSpace(volume.WorkloadID) == "" || len(volume.WorkloadID) > MaxResourceIDLength ||
+		strings.TrimSpace(volume.Name) == "" || len(volume.Name) > MaxWorkloadVolumeNameLength ||
+		strings.TrimSpace(volume.Path) == "" || len(volume.Path) > MaxWorkloadVolumePathLength ||
+		volume.MaxBytes <= 0 || volume.MaxBytes > MaxWorkloadVolumeBytes ||
+		volume.UsedBytes < 0 || volume.UsedBytes > volume.MaxBytes {
+		return ErrInvalidWorkloadVolume
 	}
 	return nil
 }

@@ -404,6 +404,86 @@ func (provider *secretLogWorkloadProvider) Logs(context.Context, models.Resource
 	}}, nil
 }
 
+func TestWorkloadProviderBoundaryScopesOwnedVolumeLifecycle(t *testing.T) {
+	ctx := context.Background()
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	metadata := workloadProviderMetadata("v6")
+	provider := NewMemoryWorkloadProvider()
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	rootA, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute-a"})
+	if err != nil {
+		t.Fatalf("CreateResource(rootA) error = %v", err)
+	}
+	rootB, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute-b"})
+	if err != nil {
+		t.Fatalf("CreateResource(rootB) error = %v", err)
+	}
+	workloadA, err := manager.CreateWorkload(ctx, rootA.ID, workloadResourceSpec(rootA.ID, "api-a", metadata))
+	if err != nil {
+		t.Fatalf("CreateWorkload(workloadA) error = %v", err)
+	}
+	workloadB, err := manager.CreateWorkload(ctx, rootB.ID, workloadResourceSpec(rootB.ID, "api-b", metadata))
+	if err != nil {
+		t.Fatalf("CreateWorkload(workloadB) error = %v", err)
+	}
+
+	volumeA, err := manager.AttachWorkloadVolume(ctx, rootA.ID, workloadA.Resource.ID, "cache", 1024)
+	if err != nil {
+		t.Fatalf("AttachWorkloadVolume() error = %v", err)
+	}
+	if volumeA.ID == "" || volumeA.WorkloadID != workloadA.Resource.ID || volumeA.Name != "cache" || volumeA.MaxBytes != 1024 || volumeA.UsedBytes != 0 {
+		t.Fatalf("AttachWorkloadVolume() = %#v, want bounded owned volume metadata", volumeA)
+	}
+	if _, err := manager.AttachWorkloadVolume(ctx, rootA.ID, workloadA.Resource.ID, "invalid", 0); !errors.Is(err, ErrInvalidWorkloadVolume) {
+		t.Fatalf("AttachWorkloadVolume(invalid bound) error = %v, want ErrInvalidWorkloadVolume", err)
+	}
+	volumeB, err := manager.AttachWorkloadVolume(ctx, rootB.ID, workloadB.Resource.ID, "cache", 1024)
+	if err != nil {
+		t.Fatalf("AttachWorkloadVolume(unrelated workload) error = %v", err)
+	}
+
+	volumesA, err := manager.ListWorkloadVolumes(ctx, rootA.ID, workloadA.Resource.ID, MaxWorkloadVolumeRecords)
+	if err != nil {
+		t.Fatalf("ListWorkloadVolumes() error = %v", err)
+	}
+	if len(volumesA) != 1 || volumesA[0].ID != volumeA.ID {
+		t.Fatalf("ListWorkloadVolumes() = %#v, want workload A volume only", volumesA)
+	}
+	if err := manager.CleanupWorkloadVolumes(ctx, rootA.ID, workloadA.Resource.ID); err != nil {
+		t.Fatalf("CleanupWorkloadVolumes() error = %v", err)
+	}
+	if err := manager.CleanupWorkloadVolumes(ctx, rootA.ID, workloadA.Resource.ID); err != nil {
+		t.Fatalf("CleanupWorkloadVolumes(repeat) error = %v, want idempotent cleanup", err)
+	}
+	volumesA, err = manager.ListWorkloadVolumes(ctx, rootA.ID, workloadA.Resource.ID, MaxWorkloadVolumeRecords)
+	if err != nil {
+		t.Fatalf("ListWorkloadVolumes(after cleanup) error = %v", err)
+	}
+	if len(volumesA) != 0 {
+		t.Fatalf("ListWorkloadVolumes(after cleanup) = %#v, want no owned volumes", volumesA)
+	}
+	volumesB, err := manager.ListWorkloadVolumes(ctx, rootB.ID, workloadB.Resource.ID, MaxWorkloadVolumeRecords)
+	if err != nil {
+		t.Fatalf("ListWorkloadVolumes(unrelated workload) error = %v", err)
+	}
+	if len(volumesB) != 1 || volumesB[0].ID != volumeB.ID {
+		t.Fatalf("ListWorkloadVolumes(unrelated workload) = %#v, want unrelated volume preserved", volumesB)
+	}
+}
+
 func TestWorkloadProviderBoundaryRedactsProviderLogs(t *testing.T) {
 	ctx := context.Background()
 	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
