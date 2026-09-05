@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
@@ -108,6 +109,108 @@ func TestWorkloadProviderBoundaryScopesLifecycleAndStatus(t *testing.T) {
 	if _, err := manager.GetWorkload(ctx, root.ID, created.Resource.ID); !errors.Is(err, ErrWorkloadNotFound) {
 		t.Fatalf("GetWorkload(deleted) error = %v, want ErrWorkloadNotFound", err)
 	}
+}
+
+func TestWorkloadProviderBoundaryReportsHealthAndReadinessTransitions(t *testing.T) {
+	ctx := context.Background()
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	metadata := workloadProviderMetadata("v1")
+	provider := &transitioningWorkloadProvider{statuses: []models.WorkloadStatus{
+		{
+			ObservedState: models.ResourceStatePending,
+			Health:        models.WorkloadHealthUnknown,
+			Readiness:     models.WorkloadReadinessNotReady,
+			Reason:        "starting",
+			ExecutionID:   "execution-1",
+		},
+		{
+			ObservedState: models.ResourceStateReady,
+			Health:        models.WorkloadHealthHealthy,
+			Readiness:     models.WorkloadReadinessReady,
+			Reason:        "health check passed",
+			ExecutionID:   "execution-2",
+		},
+		{
+			ObservedState: models.ResourceStateFailed,
+			Health:        models.WorkloadHealthUnhealthy,
+			Readiness:     models.WorkloadReadinessNotReady,
+			Reason:        "api-key=super-secret",
+			ExecutionID:   "token=super-secret",
+		},
+	}}
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	created, err := manager.CreateWorkload(ctx, root.ID, workloadResourceSpec(root.ID, "api", metadata))
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+	if created.Status.Health != models.WorkloadHealthUnknown || created.Status.Readiness != models.WorkloadReadinessNotReady {
+		t.Fatalf("initial workload status = %#v, want unknown and not-ready", created.Status)
+	}
+
+	healthy, err := manager.GetWorkload(ctx, root.ID, created.Resource.ID)
+	if err != nil {
+		t.Fatalf("GetWorkload(healthy) error = %v", err)
+	}
+	if healthy.Status.Health != models.WorkloadHealthHealthy || healthy.Status.Readiness != models.WorkloadReadinessReady {
+		t.Fatalf("healthy workload status = %#v, want healthy and ready", healthy.Status)
+	}
+
+	unhealthy, err := manager.GetWorkload(ctx, root.ID, created.Resource.ID)
+	if err != nil {
+		t.Fatalf("GetWorkload(unhealthy) error = %v", err)
+	}
+	if unhealthy.Status.Health != models.WorkloadHealthUnhealthy || unhealthy.Status.Readiness != models.WorkloadReadinessNotReady {
+		t.Fatalf("unhealthy workload status = %#v, want unhealthy and not-ready", unhealthy.Status)
+	}
+	if unhealthy.Status.Reason != "[redacted]" || unhealthy.Status.ExecutionID != "[redacted]" {
+		t.Fatalf("unhealthy workload status = %#v, want redacted sensitive fields", unhealthy.Status)
+	}
+	if unhealthy.Resource.Spec.ParentID != root.ID || unhealthy.Resource.ID != created.Resource.ID {
+		t.Fatalf("unhealthy workload resource = %#v, want original scoped identity", unhealthy.Resource)
+	}
+}
+
+type transitioningWorkloadProvider struct {
+	mu       sync.Mutex
+	statuses []models.WorkloadStatus
+	getCall  int
+}
+
+func (provider *transitioningWorkloadProvider) Create(context.Context, models.Resource) (models.WorkloadStatus, error) {
+	return provider.statuses[0], nil
+}
+
+func (provider *transitioningWorkloadProvider) Get(context.Context, models.Resource) (models.WorkloadStatus, error) {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	status := provider.statuses[provider.getCall+1]
+	provider.getCall++
+	return status, nil
+}
+
+func (provider *transitioningWorkloadProvider) Update(context.Context, models.Resource) (models.WorkloadStatus, error) {
+	return provider.statuses[len(provider.statuses)-1], nil
+}
+
+func (provider *transitioningWorkloadProvider) Delete(context.Context, models.Resource) error {
+	return nil
 }
 
 func TestWorkloadProviderBoundaryMapsUnsupportedAndInvalidProviderResults(t *testing.T) {
