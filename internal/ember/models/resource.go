@@ -146,6 +146,7 @@ type ResourceSpec struct {
 	Provider          ProviderMetadata
 	DesiredState      ResourceState
 	WorkloadResources WorkloadResources
+	SecurityContext   WorkloadSecurityContext
 }
 
 // WorkloadResources contains bounded resource requirements for a workload.
@@ -153,6 +154,13 @@ type ResourceSpec struct {
 type WorkloadResources struct {
 	CPUMillis   int64
 	MemoryBytes int64
+}
+
+// WorkloadSecurityContext describes the supported workload execution
+// privileges. The zero value is the least-privilege default.
+type WorkloadSecurityContext struct {
+	Privileged               bool
+	AllowPrivilegeEscalation bool
 }
 
 var ErrInvalidWorkloadResources = errors.New("invalid workload resources")

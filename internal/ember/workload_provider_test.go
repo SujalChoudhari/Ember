@@ -183,6 +183,51 @@ func TestWorkloadProviderEnforcesResourceBounds(t *testing.T) {
 	}
 }
 
+func TestWorkloadProviderEnforcesLeastPrivilegeDefaults(t *testing.T) {
+	ctx := context.Background()
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	metadata := workloadProviderMetadata("v1")
+	provider := NewMemoryWorkloadProvider()
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+
+	defaultSpec := workloadResourceSpec(root.ID, "default", metadata)
+	created, err := manager.CreateWorkload(ctx, root.ID, defaultSpec)
+	if err != nil {
+		t.Fatalf("CreateWorkload(default) error = %v", err)
+	}
+	if created.Resource.Spec.SecurityContext.Privileged || created.Resource.Spec.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatalf("default security context = %#v, want least privilege", created.Resource.Spec.SecurityContext)
+	}
+
+	for name, context := range map[string]models.WorkloadSecurityContext{
+		"privileged":           {Privileged: true},
+		"privilege-escalation": {AllowPrivilegeEscalation: true},
+	} {
+		spec := workloadResourceSpec(root.ID, name, metadata)
+		spec.SecurityContext = context
+		if _, err := manager.CreateWorkload(ctx, root.ID, spec); !errors.Is(err, ErrWorkloadPrivilegeDenied) {
+			t.Fatalf("CreateWorkload(%s) error = %v, want ErrWorkloadPrivilegeDenied", name, err)
+		}
+	}
+}
+
 func TestWorkloadProviderBoundaryReportsHealthAndReadinessTransitions(t *testing.T) {
 	ctx := context.Background()
 	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
