@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 )
@@ -22,11 +23,13 @@ const (
 	MaxBlobListLimit                = 100
 	MaxBlobStoreMetadataBytes       = 1 << 20
 	MaxBlobStoreQuota         int64 = 1 << 30
+	MaxBlobRetention                = 365 * 24 * time.Hour
 )
 
 var (
 	ErrInvalidBlobStorePath = errors.New("invalid blob store path")
 	ErrInvalidBlobQuota     = errors.New("invalid blob store quota")
+	ErrInvalidBlobRetention = errors.New("invalid blob retention")
 	ErrBlobObjectNotFound   = errors.New("blob object not found")
 	ErrBlobObjectCorrupt    = errors.New("corrupt blob object")
 	ErrBlobObjectTooLarge   = errors.New("blob object exceeds size limit")
@@ -55,18 +58,27 @@ type blobStoreDiskState struct {
 // FileBlobStore persists bounded object metadata and payloads below one private root.
 // Bucket resources and their lifecycle remain owned by ResourceStore.
 type FileBlobStore struct {
-	mu      sync.RWMutex
-	root    string
-	quota   int64
-	objects map[string]models.BlobObject
+	mu        sync.RWMutex
+	root      string
+	quota     int64
+	retention time.Duration
+	now       func() time.Time
+	objects   map[string]models.BlobObject
 }
 
 func NewFileBlobStore(root string, quota int64) (*FileBlobStore, error) {
+	return NewFileBlobStoreWithRetention(root, quota, 0)
+}
+
+func NewFileBlobStoreWithRetention(root string, quota int64, retention time.Duration) (*FileBlobStore, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, ErrInvalidBlobStorePath
 	}
 	if quota <= 0 || quota > MaxBlobStoreQuota {
 		return nil, ErrInvalidBlobQuota
+	}
+	if retention < 0 || retention > MaxBlobRetention {
+		return nil, ErrInvalidBlobRetention
 	}
 
 	absoluteRoot, err := filepath.Abs(filepath.Clean(root))
@@ -82,9 +94,11 @@ func NewFileBlobStore(root string, quota int64) (*FileBlobStore, error) {
 	}
 
 	store := &FileBlobStore{
-		root:    absoluteRoot,
-		quota:   quota,
-		objects: make(map[string]models.BlobObject),
+		root:      absoluteRoot,
+		quota:     quota,
+		retention: retention,
+		now:       time.Now,
+		objects:   make(map[string]models.BlobObject),
 	}
 	if err := store.load(); err != nil {
 		return nil, err
@@ -247,6 +261,10 @@ func (store *FileBlobStore) usedBytesLocked() int64 {
 	return used
 }
 
+func (store *FileBlobStore) isExpired(object models.BlobObject) bool {
+	return object.ExpiresAt != nil && !store.now().Before(*object.ExpiresAt)
+}
+
 func writeBlobPayload(path string, content []byte) (string, error) {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -362,6 +380,10 @@ func (store *FileBlobStore) Put(ctx context.Context, bucketID, objectKey string,
 		ETag:      digestText,
 		Size:      int64(len(content)),
 	}
+	if store.retention > 0 {
+		expiresAt := store.now().UTC().Add(store.retention)
+		object.ExpiresAt = &expiresAt
+	}
 	if err := object.Validate(); err != nil {
 		return nil, err
 	}
@@ -438,6 +460,9 @@ func (store *FileBlobStore) Get(ctx context.Context, bucketID, objectKey string)
 	if !exists {
 		return nil, nil, ErrBlobObjectNotFound
 	}
+	if store.isExpired(object) {
+		return nil, nil, ErrBlobObjectNotFound
+	}
 	content, err := store.readBlobPayloadLocked(object)
 	if err != nil {
 		return nil, nil, err
@@ -473,7 +498,7 @@ func (store *FileBlobStore) List(ctx context.Context, bucketID string, limit int
 
 	objects := make([]models.BlobObject, 0, limit)
 	for _, object := range store.objects {
-		if object.BucketID == bucketID {
+		if object.BucketID == bucketID && !store.isExpired(object) {
 			objects = append(objects, object)
 		}
 	}
