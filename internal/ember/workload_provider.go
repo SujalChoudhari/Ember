@@ -24,6 +24,7 @@ var (
 	ErrDuplicateWorkloadProvider     = errors.New("duplicate workload provider")
 	ErrWorkloadProviderNotFound      = errors.New("workload provider not found")
 	ErrInvalidWorkloadProvider       = errors.New("invalid workload provider")
+	ErrWorkloadResourceLimit         = errors.New("workload resource limit exceeded")
 	ErrWorkloadProviderUnsupported   = errors.New("workload provider operation unsupported")
 	ErrWorkloadProviderOperation     = errors.New("workload provider operation failed")
 	ErrInvalidWorkloadProviderStatus = errors.New("invalid workload provider status")
@@ -38,6 +39,7 @@ var (
 	errProviderConflict             = errors.New("provider workload conflict")
 	errProviderInvalidVolume        = errors.New("provider volume invalid")
 	errProviderDuplicateVolume      = errors.New("provider volume duplicate")
+	errProviderResourceLimit        = errors.New("provider workload resource limit exceeded")
 )
 
 // WorkloadProvider is the execution boundary for a workload resource. The
@@ -71,6 +73,19 @@ type WorkloadVolumeProvider interface {
 type WorkloadProviderRegistry struct {
 	mu        sync.RWMutex
 	providers map[string]WorkloadProvider
+}
+
+type WorkloadResourceLimits struct {
+	MaxCPUMillis   int64
+	MaxMemoryBytes int64
+}
+
+func (limits WorkloadResourceLimits) Validate() error {
+	if limits.MaxCPUMillis <= 0 || limits.MaxCPUMillis > models.MaxWorkloadCPUMillis ||
+		limits.MaxMemoryBytes <= 0 || limits.MaxMemoryBytes > models.MaxWorkloadMemoryBytes {
+		return ErrInvalidWorkloadProvider
+	}
+	return nil
 }
 
 func NewWorkloadProviderRegistry() (*WorkloadProviderRegistry, error) {
@@ -176,6 +191,14 @@ func (manager *WorkloadManager) CreateWorkload(ctx context.Context, scopeID stri
 	}
 	status, providerErr := provider.Create(ctx, *resource)
 	if providerErr != nil {
+		if errors.Is(providerErr, errProviderResourceLimit) {
+			view, statusErr := newWorkloadView(*resource, status)
+			if statusErr != nil {
+				_ = manager.resources.DeleteResource(ctx, scopeID, resource.ID)
+				return nil, statusErr
+			}
+			return view, ErrWorkloadResourceLimit
+		}
 		_ = manager.resources.DeleteResource(ctx, scopeID, resource.ID)
 		return nil, mapWorkloadProviderError(providerErr)
 	}
@@ -487,6 +510,8 @@ func mapWorkloadProviderError(err error) error {
 		return ErrWorkloadProviderOperation
 	case errors.Is(err, errProviderDuplicateVolume):
 		return ErrDuplicateWorkloadVolume
+	case errors.Is(err, errProviderResourceLimit):
+		return ErrWorkloadResourceLimit
 	default:
 		return ErrWorkloadProviderOperation
 	}
@@ -501,15 +526,28 @@ type MemoryWorkloadProvider struct {
 	restarts     map[string]uint64
 	volumes      map[string][]models.WorkloadVolume
 	nextVolumeID uint64
+	limits       WorkloadResourceLimits
 }
 
 func NewMemoryWorkloadProvider() *MemoryWorkloadProvider {
+	provider, _ := NewMemoryWorkloadProviderWithLimits(WorkloadResourceLimits{
+		MaxCPUMillis:   models.MaxWorkloadCPUMillis,
+		MaxMemoryBytes: models.MaxWorkloadMemoryBytes,
+	})
+	return provider
+}
+
+func NewMemoryWorkloadProviderWithLimits(limits WorkloadResourceLimits) (*MemoryWorkloadProvider, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
 	return &MemoryWorkloadProvider{
 		workloads: make(map[string]models.WorkloadStatus),
 		logs:      make(map[string][]models.WorkloadLog),
 		restarts:  make(map[string]uint64),
 		volumes:   make(map[string][]models.WorkloadVolume),
-	}
+		limits:    limits,
+	}, nil
 }
 
 func validateProviderResource(resource models.Resource) error {
@@ -542,6 +580,21 @@ func memoryWorkloadStatus(resource models.Resource) models.WorkloadStatus {
 	}
 }
 
+func (provider *MemoryWorkloadProvider) withinResourceLimits(resources models.WorkloadResources) bool {
+	return (resources.CPUMillis == 0 || resources.CPUMillis <= provider.limits.MaxCPUMillis) &&
+		(resources.MemoryBytes == 0 || resources.MemoryBytes <= provider.limits.MaxMemoryBytes)
+}
+
+func workloadResourceLimitStatus(resource models.Resource) models.WorkloadStatus {
+	return models.WorkloadStatus{
+		ObservedState: models.ResourceStateFailed,
+		Health:        models.WorkloadHealthUnhealthy,
+		Readiness:     models.WorkloadReadinessNotReady,
+		Reason:        "workload resource limit exceeded",
+		ExecutionID:   "memory:" + resource.ID,
+	}
+}
+
 func (provider *MemoryWorkloadProvider) Create(ctx context.Context, resource models.Resource) (models.WorkloadStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return models.WorkloadStatus{}, err
@@ -556,6 +609,11 @@ func (provider *MemoryWorkloadProvider) Create(ctx context.Context, resource mod
 	}
 	if len(provider.workloads) >= MaxWorkloadProviderRecords {
 		return models.WorkloadStatus{}, errProviderConflict
+	}
+	if !provider.withinResourceLimits(resource.Spec.WorkloadResources) {
+		status := workloadResourceLimitStatus(resource)
+		provider.workloads[resource.ID] = status
+		return status, errProviderResourceLimit
 	}
 	status := memoryWorkloadStatus(resource)
 	provider.workloads[resource.ID] = status
@@ -728,6 +786,11 @@ func (provider *MemoryWorkloadProvider) Update(ctx context.Context, resource mod
 	defer provider.mu.Unlock()
 	if _, exists := provider.workloads[resource.ID]; !exists {
 		return models.WorkloadStatus{}, errProviderNotFound
+	}
+	if !provider.withinResourceLimits(resource.Spec.WorkloadResources) {
+		status := workloadResourceLimitStatus(resource)
+		provider.workloads[resource.ID] = status
+		return status, errProviderResourceLimit
 	}
 	status := memoryWorkloadStatus(resource)
 	provider.workloads[resource.ID] = status

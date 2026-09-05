@@ -116,6 +116,73 @@ func TestWorkloadProviderBoundaryScopesLifecycleAndStatus(t *testing.T) {
 	}
 }
 
+func TestWorkloadProviderEnforcesResourceBounds(t *testing.T) {
+	ctx := context.Background()
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	metadata := workloadProviderMetadata("v1")
+	provider, err := NewMemoryWorkloadProviderWithLimits(WorkloadResourceLimits{
+		MaxCPUMillis:   2000,
+		MaxMemoryBytes: 512 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewMemoryWorkloadProviderWithLimits() error = %v", err)
+	}
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+
+	withinBounds := workloadResourceSpec(root.ID, "bounded", metadata)
+	withinBounds.WorkloadResources = models.WorkloadResources{CPUMillis: 1000, MemoryBytes: 256 << 20}
+	created, err := manager.CreateWorkload(ctx, root.ID, withinBounds)
+	if err != nil {
+		t.Fatalf("CreateWorkload(within bounds) error = %v", err)
+	}
+	if created.Status.ObservedState != models.ResourceStateReady || created.Status.Health != models.WorkloadHealthHealthy || created.Status.Readiness != models.WorkloadReadinessReady {
+		t.Fatalf("within-bounds status = %#v, want ready/healthy/ready", created.Status)
+	}
+
+	overLimit := workloadResourceSpec(root.ID, "over-limit", metadata)
+	overLimit.WorkloadResources = models.WorkloadResources{CPUMillis: 4000, MemoryBytes: 256 << 20}
+	rejected, err := manager.CreateWorkload(ctx, root.ID, overLimit)
+	if !errors.Is(err, ErrWorkloadResourceLimit) {
+		t.Fatalf("CreateWorkload(over CPU limit) error = %v, want ErrWorkloadResourceLimit", err)
+	}
+	if rejected == nil || rejected.Status.ObservedState != models.ResourceStateFailed || rejected.Status.Health != models.WorkloadHealthUnhealthy || rejected.Status.Readiness != models.WorkloadReadinessNotReady {
+		t.Fatalf("over-limit response = %#v, want bounded failed status", rejected)
+	}
+	if rejected.Status.Reason != "workload resource limit exceeded" || strings.Contains(rejected.Status.Reason, "4000") {
+		t.Fatalf("over-limit reason = %q, want stable redacted reason", rejected.Status.Reason)
+	}
+	inspected, err := manager.GetWorkload(ctx, root.ID, rejected.Resource.ID)
+	if err != nil {
+		t.Fatalf("GetWorkload(over CPU limit) error = %v", err)
+	}
+	if inspected.Status.ObservedState != models.ResourceStateFailed || inspected.Status.Reason != rejected.Status.Reason {
+		t.Fatalf("inspected over-limit status = %#v, want persisted bounded failure", inspected.Status)
+	}
+
+	overMemory := workloadResourceSpec(root.ID, "over-memory", metadata)
+	overMemory.WorkloadResources = models.WorkloadResources{CPUMillis: 1000, MemoryBytes: 1024 << 20}
+	if _, err := manager.CreateWorkload(ctx, root.ID, overMemory); !errors.Is(err, ErrWorkloadResourceLimit) {
+		t.Fatalf("CreateWorkload(over memory limit) error = %v, want ErrWorkloadResourceLimit", err)
+	}
+}
+
 func TestWorkloadProviderBoundaryReportsHealthAndReadinessTransitions(t *testing.T) {
 	ctx := context.Background()
 	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
