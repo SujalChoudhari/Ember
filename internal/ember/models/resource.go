@@ -3,6 +3,7 @@ package models
 import (
 	"errors"
 	"strings"
+	"time"
 )
 
 type ResourceType string
@@ -160,11 +161,19 @@ type WorkloadStatus struct {
 	ExecutionID   string
 }
 
+type WorkloadLog struct {
+	Timestamp   time.Time
+	Stream      string
+	Message     string
+	ExecutionID string
+}
+
 var (
 	ErrInvalidResourceSpec   = errors.New("invalid resource spec")
 	ErrInvalidResource       = errors.New("invalid resource")
 	ErrInvalidResourceLock   = errors.New("invalid resource lock")
 	ErrInvalidWorkloadStatus = errors.New("invalid workload status")
+	ErrInvalidWorkloadLog    = errors.New("invalid workload log")
 )
 
 func (spec ResourceSpec) Validate() error {
@@ -196,4 +205,23 @@ func (status WorkloadStatus) Validate() error {
 		return ErrInvalidWorkloadStatus
 	}
 	return nil
+}
+
+const (
+	MaxWorkloadLogStreamLength  = 16
+	MaxWorkloadLogMessageLength = 512
+)
+
+func (log WorkloadLog) Validate() error {
+	if log.Timestamp.IsZero() || strings.TrimSpace(log.Stream) == "" || len(log.Stream) > MaxWorkloadLogStreamLength ||
+		strings.TrimSpace(log.Message) == "" || len(log.Message) > MaxWorkloadLogMessageLength ||
+		!validOptionalBoundedText(log.ExecutionID, MaxWorkloadExecutionIDLength) {
+		return ErrInvalidWorkloadLog
+	}
+	switch log.Stream {
+	case "stdout", "stderr", "system":
+		return nil
+	default:
+		return ErrInvalidWorkloadLog
+	}
 }

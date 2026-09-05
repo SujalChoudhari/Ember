@@ -3,14 +3,17 @@ package ember
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
 
 const MaxWorkloadProviderRecords = 100
+const MaxWorkloadLogRecords = 100
 
 var (
 	ErrInvalidWorkloadControlPlane   = errors.New("invalid workload control plane")
@@ -23,6 +26,8 @@ var (
 	ErrWorkloadProviderUnsupported   = errors.New("workload provider operation unsupported")
 	ErrWorkloadProviderOperation     = errors.New("workload provider operation failed")
 	ErrInvalidWorkloadProviderStatus = errors.New("invalid workload provider status")
+	ErrInvalidWorkloadLogLimit       = errors.New("invalid workload log limit")
+	ErrInvalidWorkloadProviderLog    = errors.New("invalid workload provider log")
 
 	errProviderOperationUnsupported = errors.New("provider operation unsupported")
 	errProviderNotFound             = errors.New("provider workload not found")
@@ -37,6 +42,14 @@ type WorkloadProvider interface {
 	Get(context.Context, models.Resource) (models.WorkloadStatus, error)
 	Update(context.Context, models.Resource) (models.WorkloadStatus, error)
 	Delete(context.Context, models.Resource) error
+}
+
+type WorkloadLogProvider interface {
+	Logs(context.Context, models.Resource, int) ([]models.WorkloadLog, error)
+}
+
+type WorkloadRestartProvider interface {
+	Restart(context.Context, models.Resource) (models.WorkloadStatus, error)
 }
 
 // WorkloadProviderRegistry holds the bounded provider registrations used by
@@ -101,6 +114,8 @@ type WorkloadControlPlane interface {
 	CreateWorkload(context.Context, string, models.ResourceSpec) (*WorkloadView, error)
 	GetWorkload(context.Context, string, string) (*WorkloadView, error)
 	UpdateWorkload(context.Context, string, string) (*WorkloadView, error)
+	RestartWorkload(context.Context, string, string) (*WorkloadView, error)
+	GetWorkloadLogs(context.Context, string, string, int) ([]models.WorkloadLog, error)
 	DeleteWorkload(context.Context, string, string) error
 }
 
@@ -241,6 +256,79 @@ func (manager *WorkloadManager) DeleteWorkload(ctx context.Context, scopeID, res
 	}
 }
 
+func (manager *WorkloadManager) RestartWorkload(ctx context.Context, scopeID, resourceID string) (*WorkloadView, error) {
+	if err := validateWorkloadLookup(ctx, scopeID, resourceID); err != nil {
+		return nil, err
+	}
+	resource, err := manager.resources.GetResource(ctx, scopeID, resourceID)
+	if errors.Is(err, persistence.ErrResourceNotFound) {
+		return nil, ErrWorkloadNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resource.Spec.Type != models.ResourceTypeWorkload {
+		return nil, ErrWorkloadNotFound
+	}
+	provider, err := manager.registry.Resolve(resource.Spec.Provider)
+	if err != nil {
+		return nil, err
+	}
+	restarter, ok := provider.(WorkloadRestartProvider)
+	if !ok {
+		return nil, ErrWorkloadProviderUnsupported
+	}
+	status, providerErr := restarter.Restart(ctx, *resource)
+	if providerErr != nil {
+		return nil, mapWorkloadProviderError(providerErr)
+	}
+	return newWorkloadView(*resource, status)
+}
+
+func (manager *WorkloadManager) GetWorkloadLogs(ctx context.Context, scopeID, resourceID string, limit int) ([]models.WorkloadLog, error) {
+	if err := validateWorkloadLookup(ctx, scopeID, resourceID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > MaxWorkloadLogRecords {
+		return nil, ErrInvalidWorkloadLogLimit
+	}
+	resource, err := manager.resources.GetResource(ctx, scopeID, resourceID)
+	if errors.Is(err, persistence.ErrResourceNotFound) {
+		return nil, ErrWorkloadNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resource.Spec.Type != models.ResourceTypeWorkload {
+		return nil, ErrWorkloadNotFound
+	}
+	provider, err := manager.registry.Resolve(resource.Spec.Provider)
+	if err != nil {
+		return nil, err
+	}
+	logProvider, ok := provider.(WorkloadLogProvider)
+	if !ok {
+		return nil, ErrWorkloadProviderUnsupported
+	}
+	logs, providerErr := logProvider.Logs(ctx, *resource, limit)
+	if providerErr != nil {
+		return nil, mapWorkloadProviderError(providerErr)
+	}
+	if len(logs) > limit {
+		logs = logs[:limit]
+	}
+	safeLogs := make([]models.WorkloadLog, 0, len(logs))
+	for _, log := range logs {
+		if err := log.Validate(); err != nil {
+			return nil, ErrInvalidWorkloadProviderLog
+		}
+		log.Message = redactWorkloadStatusValue(log.Message)
+		log.ExecutionID = redactWorkloadStatusValue(log.ExecutionID)
+		safeLogs = append(safeLogs, log)
+	}
+	return safeLogs, nil
+}
+
 func newWorkloadView(resource models.Resource, status models.WorkloadStatus) (*WorkloadView, error) {
 	if err := status.Validate(); err != nil {
 		return nil, ErrInvalidWorkloadProviderStatus
@@ -285,10 +373,16 @@ func mapWorkloadProviderError(err error) error {
 type MemoryWorkloadProvider struct {
 	mu        sync.RWMutex
 	workloads map[string]models.WorkloadStatus
+	logs      map[string][]models.WorkloadLog
+	restarts  map[string]uint64
 }
 
 func NewMemoryWorkloadProvider() *MemoryWorkloadProvider {
-	return &MemoryWorkloadProvider{workloads: make(map[string]models.WorkloadStatus)}
+	return &MemoryWorkloadProvider{
+		workloads: make(map[string]models.WorkloadStatus),
+		logs:      make(map[string][]models.WorkloadLog),
+		restarts:  make(map[string]uint64),
+	}
 }
 
 func validateProviderResource(resource models.Resource) error {
@@ -341,6 +435,61 @@ func (provider *MemoryWorkloadProvider) Create(ctx context.Context, resource mod
 	return status, nil
 }
 
+func (provider *MemoryWorkloadProvider) Restart(ctx context.Context, resource models.Resource) (models.WorkloadStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return models.WorkloadStatus{}, err
+	}
+	if err := validateProviderResource(resource); err != nil {
+		return models.WorkloadStatus{}, errProviderOperationUnsupported
+	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if _, exists := provider.workloads[resource.ID]; !exists {
+		return models.WorkloadStatus{}, errProviderNotFound
+	}
+	provider.restarts[resource.ID]++
+	status := memoryWorkloadStatus(resource)
+	status.ExecutionID = fmt.Sprintf("restart:%s:%d", resource.ID, provider.restarts[resource.ID])
+	provider.workloads[resource.ID] = status
+	provider.appendLogLocked(resource.ID, models.WorkloadLog{
+		Timestamp:   time.Now().UTC(),
+		Stream:      "system",
+		Message:     "workload restarted",
+		ExecutionID: status.ExecutionID,
+	})
+	return status, nil
+}
+
+func (provider *MemoryWorkloadProvider) Logs(ctx context.Context, resource models.Resource, limit int) ([]models.WorkloadLog, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateProviderResource(resource); err != nil {
+		return nil, errProviderOperationUnsupported
+	}
+	if limit <= 0 || limit > MaxWorkloadLogRecords {
+		return nil, errProviderOperationUnsupported
+	}
+	provider.mu.RLock()
+	defer provider.mu.RUnlock()
+	if _, exists := provider.workloads[resource.ID]; !exists {
+		return nil, errProviderNotFound
+	}
+	logs := provider.logs[resource.ID]
+	if len(logs) > limit {
+		logs = logs[len(logs)-limit:]
+	}
+	return append([]models.WorkloadLog(nil), logs...), nil
+}
+
+func (provider *MemoryWorkloadProvider) appendLogLocked(resourceID string, log models.WorkloadLog) {
+	logs := append(provider.logs[resourceID], log)
+	if len(logs) > MaxWorkloadLogRecords {
+		logs = logs[len(logs)-MaxWorkloadLogRecords:]
+	}
+	provider.logs[resourceID] = logs
+}
+
 func (provider *MemoryWorkloadProvider) Get(ctx context.Context, resource models.Resource) (models.WorkloadStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return models.WorkloadStatus{}, err
@@ -387,8 +536,12 @@ func (provider *MemoryWorkloadProvider) Delete(ctx context.Context, resource mod
 		return errProviderNotFound
 	}
 	delete(provider.workloads, resource.ID)
+	delete(provider.logs, resource.ID)
+	delete(provider.restarts, resource.ID)
 	return nil
 }
 
 var _ WorkloadProvider = (*MemoryWorkloadProvider)(nil)
+var _ WorkloadLogProvider = (*MemoryWorkloadProvider)(nil)
+var _ WorkloadRestartProvider = (*MemoryWorkloadProvider)(nil)
 var _ WorkloadControlPlane = (*WorkloadManager)(nil)

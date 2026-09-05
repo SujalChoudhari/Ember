@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
@@ -31,6 +32,10 @@ type unsupportedWorkloadUpdateProvider struct {
 }
 
 func (provider *unsupportedWorkloadUpdateProvider) Update(context.Context, models.Resource) (models.WorkloadStatus, error) {
+	return models.WorkloadStatus{}, errProviderOperationUnsupported
+}
+
+func (provider *unsupportedWorkloadUpdateProvider) Restart(context.Context, models.Resource) (models.WorkloadStatus, error) {
 	return models.WorkloadStatus{}, errProviderOperationUnsupported
 }
 
@@ -240,6 +245,9 @@ func TestWorkloadProviderBoundaryMapsUnsupportedAndInvalidProviderResults(t *tes
 	if err != nil {
 		t.Fatalf("CreateWorkload() error = %v", err)
 	}
+	if _, err := manager.RestartWorkload(ctx, root.ID, created.Resource.ID); !errors.Is(err, ErrWorkloadProviderUnsupported) {
+		t.Fatalf("RestartWorkload(unsupported) error = %v, want ErrWorkloadProviderUnsupported", err)
+	}
 	updateErr := error(nil)
 	if _, updateErr = manager.UpdateWorkload(ctx, root.ID, created.Resource.ID); !errors.Is(updateErr, ErrWorkloadProviderUnsupported) {
 		t.Fatalf("UpdateWorkload(unsupported) error = %v, want ErrWorkloadProviderUnsupported", updateErr)
@@ -313,4 +321,121 @@ func newWorkloadFileResourceStore(t *testing.T) persistence.ResourceStore {
 		t.Fatalf("NewFileResourceStore() error = %v", err)
 	}
 	return store
+}
+
+func TestWorkloadProviderBoundaryRetrievesRedactedLogsAndRestarts(t *testing.T) {
+	ctx := context.Background()
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	metadata := workloadProviderMetadata("v4")
+	provider := NewMemoryWorkloadProvider()
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+	created, err := manager.CreateWorkload(ctx, root.ID, workloadResourceSpec(root.ID, "api", metadata))
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+
+	if _, err := manager.GetWorkloadLogs(ctx, root.ID, created.Resource.ID, 0); !errors.Is(err, ErrInvalidWorkloadLogLimit) {
+		t.Fatalf("GetWorkloadLogs(invalid limit) error = %v, want ErrInvalidWorkloadLogLimit", err)
+	}
+	restarted, err := manager.RestartWorkload(ctx, root.ID, created.Resource.ID)
+	if err != nil {
+		t.Fatalf("RestartWorkload() error = %v", err)
+	}
+	if restarted.Resource.ID != created.Resource.ID || restarted.Status.ObservedState != models.ResourceStateReady || restarted.Status.ExecutionID == created.Status.ExecutionID {
+		t.Fatalf("RestartWorkload() = %#v, want stable resource and new ready execution", restarted)
+	}
+	for i := 1; i < MaxWorkloadLogRecords+5; i++ {
+		restarted, err = manager.RestartWorkload(ctx, root.ID, created.Resource.ID)
+		if err != nil {
+			t.Fatalf("RestartWorkload(%d) error = %v", i, err)
+		}
+	}
+	logs, err := manager.GetWorkloadLogs(ctx, root.ID, created.Resource.ID, MaxWorkloadLogRecords)
+	if err != nil {
+		t.Fatalf("GetWorkloadLogs() error = %v", err)
+	}
+	if len(logs) != MaxWorkloadLogRecords {
+		t.Fatalf("GetWorkloadLogs() returned %d records, want bounded %d", len(logs), MaxWorkloadLogRecords)
+	}
+	foundCorrelation := false
+	for _, log := range logs {
+		if log.ExecutionID == restarted.Status.ExecutionID {
+			foundCorrelation = true
+		}
+		if strings.Contains(strings.ToLower(log.Message), "secret") || strings.Contains(strings.ToLower(log.Message), "token") {
+			t.Fatalf("GetWorkloadLogs() leaked sensitive marker: %#v", log)
+		}
+	}
+	if !foundCorrelation {
+		t.Fatalf("GetWorkloadLogs() = %#v, want restart execution correlation %q", logs, restarted.Status.ExecutionID)
+	}
+	if _, err := manager.GetWorkloadLogs(ctx, "wrong-scope", created.Resource.ID, MaxWorkloadLogRecords); !errors.Is(err, ErrWorkloadNotFound) {
+		t.Fatalf("GetWorkloadLogs(cross scope) error = %v, want ErrWorkloadNotFound", err)
+	}
+}
+
+type secretLogWorkloadProvider struct {
+	*MemoryWorkloadProvider
+}
+
+func (provider *secretLogWorkloadProvider) Logs(context.Context, models.Resource, int) ([]models.WorkloadLog, error) {
+	return []models.WorkloadLog{{
+		Timestamp:   time.Unix(1, 0).UTC(),
+		Stream:      "stderr",
+		Message:     "api-key=super-secret",
+		ExecutionID: "execution-safe",
+	}}, nil
+}
+
+func TestWorkloadProviderBoundaryRedactsProviderLogs(t *testing.T) {
+	ctx := context.Background()
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	metadata := workloadProviderMetadata("v5")
+	provider := &secretLogWorkloadProvider{MemoryWorkloadProvider: NewMemoryWorkloadProvider()}
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+	created, err := manager.CreateWorkload(ctx, root.ID, workloadResourceSpec(root.ID, "api", metadata))
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+	logs, err := manager.GetWorkloadLogs(ctx, root.ID, created.Resource.ID, 1)
+	if err != nil {
+		t.Fatalf("GetWorkloadLogs() error = %v", err)
+	}
+	if len(logs) != 1 || logs[0].Message != "[redacted]" || logs[0].ExecutionID != "execution-safe" {
+		t.Fatalf("GetWorkloadLogs() = %#v, want redacted bounded log", logs)
+	}
 }
