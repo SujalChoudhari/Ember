@@ -257,6 +257,7 @@ func (store *FileResourceStore) Create(ctx context.Context, spec models.Resource
 			Provider:          spec.Provider,
 			DesiredState:      spec.DesiredState,
 			WorkloadResources: spec.WorkloadResources,
+			SecurityContext:   spec.SecurityContext,
 		},
 		ObservedState: models.ResourceStateUnknown,
 	}

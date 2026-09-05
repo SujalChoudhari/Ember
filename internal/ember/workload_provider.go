@@ -33,6 +33,7 @@ var (
 	ErrInvalidWorkloadVolume         = errors.New("invalid workload volume")
 	ErrInvalidWorkloadVolumeLimit    = errors.New("invalid workload volume limit")
 	ErrDuplicateWorkloadVolume       = errors.New("duplicate workload volume")
+	ErrWorkloadPrivilegeDenied       = errors.New("workload privilege denied")
 
 	errProviderOperationUnsupported = errors.New("provider operation unsupported")
 	errProviderNotFound             = errors.New("provider workload not found")
@@ -40,6 +41,7 @@ var (
 	errProviderInvalidVolume        = errors.New("provider volume invalid")
 	errProviderDuplicateVolume      = errors.New("provider volume duplicate")
 	errProviderResourceLimit        = errors.New("provider workload resource limit exceeded")
+	errProviderPrivilegeUnsupported = errors.New("provider workload privilege unsupported")
 )
 
 // WorkloadProvider is the execution boundary for a workload resource. The
@@ -512,6 +514,8 @@ func mapWorkloadProviderError(err error) error {
 		return ErrDuplicateWorkloadVolume
 	case errors.Is(err, errProviderResourceLimit):
 		return ErrWorkloadResourceLimit
+	case errors.Is(err, errProviderPrivilegeUnsupported):
+		return ErrWorkloadPrivilegeDenied
 	default:
 		return ErrWorkloadProviderOperation
 	}
@@ -554,7 +558,17 @@ func validateProviderResource(resource models.Resource) error {
 	if resource.Spec.Type != models.ResourceTypeWorkload || resource.Validate() != nil {
 		return ErrInvalidWorkloadSpec
 	}
+	if resource.Spec.SecurityContext.Privileged || resource.Spec.SecurityContext.AllowPrivilegeEscalation {
+		return errProviderPrivilegeUnsupported
+	}
 	return nil
+}
+
+func mapProviderValidationError(err error) error {
+	if errors.Is(err, errProviderPrivilegeUnsupported) {
+		return err
+	}
+	return errProviderOperationUnsupported
 }
 
 func memoryWorkloadStatus(resource models.Resource) models.WorkloadStatus {
@@ -600,7 +614,7 @@ func (provider *MemoryWorkloadProvider) Create(ctx context.Context, resource mod
 		return models.WorkloadStatus{}, err
 	}
 	if err := validateProviderResource(resource); err != nil {
-		return models.WorkloadStatus{}, errProviderOperationUnsupported
+		return models.WorkloadStatus{}, mapProviderValidationError(err)
 	}
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
@@ -625,7 +639,7 @@ func (provider *MemoryWorkloadProvider) Restart(ctx context.Context, resource mo
 		return models.WorkloadStatus{}, err
 	}
 	if err := validateProviderResource(resource); err != nil {
-		return models.WorkloadStatus{}, errProviderOperationUnsupported
+		return models.WorkloadStatus{}, mapProviderValidationError(err)
 	}
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
@@ -650,7 +664,7 @@ func (provider *MemoryWorkloadProvider) Logs(ctx context.Context, resource model
 		return nil, err
 	}
 	if err := validateProviderResource(resource); err != nil {
-		return nil, errProviderOperationUnsupported
+		return nil, mapProviderValidationError(err)
 	}
 	if limit <= 0 || limit > MaxWorkloadLogRecords {
 		return nil, errProviderOperationUnsupported
@@ -680,7 +694,7 @@ func (provider *MemoryWorkloadProvider) AttachVolume(ctx context.Context, resour
 		return models.WorkloadVolume{}, err
 	}
 	if err := validateProviderResource(resource); err != nil {
-		return models.WorkloadVolume{}, errProviderOperationUnsupported
+		return models.WorkloadVolume{}, mapProviderValidationError(err)
 	}
 	if validateWorkloadVolumeRequest(name, maxBytes) != nil {
 		return models.WorkloadVolume{}, errProviderInvalidVolume
@@ -724,7 +738,7 @@ func (provider *MemoryWorkloadProvider) ListVolumes(ctx context.Context, resourc
 		return nil, err
 	}
 	if err := validateProviderResource(resource); err != nil {
-		return nil, errProviderOperationUnsupported
+		return nil, mapProviderValidationError(err)
 	}
 	if limit <= 0 || limit > MaxWorkloadVolumeRecords {
 		return nil, errProviderOperationUnsupported
@@ -747,7 +761,7 @@ func (provider *MemoryWorkloadProvider) CleanupVolumes(ctx context.Context, reso
 		return err
 	}
 	if err := validateProviderResource(resource); err != nil {
-		return errProviderOperationUnsupported
+		return mapProviderValidationError(err)
 	}
 
 	provider.mu.Lock()
@@ -764,7 +778,7 @@ func (provider *MemoryWorkloadProvider) Get(ctx context.Context, resource models
 		return models.WorkloadStatus{}, err
 	}
 	if err := validateProviderResource(resource); err != nil {
-		return models.WorkloadStatus{}, errProviderOperationUnsupported
+		return models.WorkloadStatus{}, mapProviderValidationError(err)
 	}
 	provider.mu.RLock()
 	defer provider.mu.RUnlock()
@@ -780,7 +794,7 @@ func (provider *MemoryWorkloadProvider) Update(ctx context.Context, resource mod
 		return models.WorkloadStatus{}, err
 	}
 	if err := validateProviderResource(resource); err != nil {
-		return models.WorkloadStatus{}, errProviderOperationUnsupported
+		return models.WorkloadStatus{}, mapProviderValidationError(err)
 	}
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
@@ -802,7 +816,7 @@ func (provider *MemoryWorkloadProvider) Delete(ctx context.Context, resource mod
 		return err
 	}
 	if err := validateProviderResource(resource); err != nil {
-		return errProviderOperationUnsupported
+		return mapProviderValidationError(err)
 	}
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
