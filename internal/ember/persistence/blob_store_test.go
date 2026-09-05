@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 )
@@ -239,6 +240,37 @@ func TestFileBlobStoreDetectsCorruptionAndResetsOwnedResidue(t *testing.T) {
 	}
 	if len(objects) != 0 {
 		t.Fatalf("List(after reset) = %#v, want empty", objects)
+	}
+}
+
+func TestFileBlobStoreAppliesRetentionAcrossRestart(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	start := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	store, err := NewFileBlobStoreWithRetention(root, 64, time.Hour)
+	if err != nil {
+		t.Fatalf("NewFileBlobStoreWithRetention() error = %v", err)
+	}
+	store.now = func() time.Time { return start }
+	putBlob(t, store, "resource-1", "retained", []byte("payload"))
+	if _, _, err := store.Get(ctx, "resource-1", "retained"); err != nil {
+		t.Fatalf("Get(before retention deadline) error = %v", err)
+	}
+
+	reopened, err := NewFileBlobStoreWithRetention(root, 64, time.Hour)
+	if err != nil {
+		t.Fatalf("NewFileBlobStoreWithRetention(reopen) error = %v", err)
+	}
+	reopened.now = func() time.Time { return start.Add(time.Hour) }
+	if _, _, err := reopened.Get(ctx, "resource-1", "retained"); !errors.Is(err, ErrBlobObjectNotFound) {
+		t.Fatalf("Get(after retention deadline) error = %v, want ErrBlobObjectNotFound", err)
+	}
+	objects, err := reopened.List(ctx, "resource-1", MaxBlobListLimit)
+	if err != nil {
+		t.Fatalf("List(after retention deadline) error = %v", err)
+	}
+	if len(objects) != 0 {
+		t.Fatalf("List(after retention deadline) = %#v, want empty", objects)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -24,6 +25,7 @@ type BlobObject struct {
 	SHA256    string
 	ETag      string
 	Size      int64
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
 var (
@@ -63,6 +65,9 @@ func (object BlobObject) Validate() error {
 		return ErrInvalidBlobObject
 	}
 	if _, err := hex.DecodeString(object.SHA256); err != nil {
+		return ErrInvalidBlobObject
+	}
+	if object.ExpiresAt != nil && object.ExpiresAt.IsZero() {
 		return ErrInvalidBlobObject
 	}
 	return nil
