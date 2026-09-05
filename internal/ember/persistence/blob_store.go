@@ -21,6 +21,7 @@ import (
 const (
 	blobStoreVersion                = 1
 	MaxBlobListLimit                = 100
+	MaxBlobCleanupLimit             = 100
 	MaxBlobStoreMetadataBytes       = 1 << 20
 	MaxBlobStoreQuota         int64 = 1 << 30
 	MaxBlobRetention                = 365 * 24 * time.Hour
@@ -41,6 +42,7 @@ var (
 	ErrBlobStoreIO                  = errors.New("blob store I/O failure")
 	ErrBlobRecoveryChecksumMismatch = errors.New("blob recovery checksum mismatch")
 	ErrBlobRecoveryConflict         = errors.New("blob recovery conflict")
+	ErrInvalidBlobCleanupLimit      = errors.New("invalid blob cleanup limit")
 )
 
 type BlobStore interface {
@@ -50,8 +52,19 @@ type BlobStore interface {
 	Recover(ctx context.Context, bucketID, objectKey, expectedSHA256 string, content []byte) (*models.BlobObject, error)
 	ReadRange(ctx context.Context, bucketID, objectKey string, start, end int64) ([]byte, error)
 	List(ctx context.Context, bucketID string, limit int) ([]models.BlobObject, error)
+	Cleanup(ctx context.Context, bucketID string, limit int) (*BlobCleanupReport, error)
 	Delete(ctx context.Context, bucketID, objectKey string) error
 	Reset(ctx context.Context) error
+}
+
+// BlobCleanupReport contains bounded, payload-free evidence from one cleanup
+// pass over one bucket.
+type BlobCleanupReport struct {
+	BucketID string `json:"bucket_id"`
+	Scanned  int    `json:"scanned"`
+	Removed  int    `json:"removed"`
+	Expired  int    `json:"expired"`
+	Corrupt  int    `json:"corrupt"`
 }
 
 type blobStoreDiskState struct {
@@ -635,6 +648,97 @@ func (store *FileBlobStore) List(ctx context.Context, bucketID string, limit int
 		objects = objects[:limit]
 	}
 	return objects, nil
+}
+
+func (store *FileBlobStore) Cleanup(ctx context.Context, bucketID string, limit int) (*BlobCleanupReport, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := models.ValidateBlobBucketID(bucketID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > MaxBlobCleanupLimit {
+		return nil, ErrInvalidBlobCleanupLimit
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	candidates := make([]models.BlobObject, 0, limit)
+	for _, object := range store.objects {
+		if object.BucketID == bucketID {
+			candidates = append(candidates, object)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Key < candidates[j].Key
+	})
+
+	report := &BlobCleanupReport{BucketID: bucketID}
+	for _, object := range candidates {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		if report.Scanned == limit {
+			break
+		}
+		report.Scanned++
+
+		expired := store.isExpired(object)
+		corrupt := false
+		if !expired {
+			_, _, err := store.inspectBlobPayloadLocked(object)
+			if err == nil {
+				continue
+			}
+			if !errors.Is(err, ErrBlobObjectCorrupt) {
+				return report, err
+			}
+			corrupt = true
+		}
+		if err := store.removeBlobObjectLocked(object); err != nil {
+			return report, err
+		}
+		report.Removed++
+		if expired {
+			report.Expired++
+		} else if corrupt {
+			report.Corrupt++
+		}
+	}
+	return report, nil
+}
+
+func (store *FileBlobStore) removeBlobObjectLocked(object models.BlobObject) error {
+	mapKey := blobObjectMapKey(object.BucketID, object.Key)
+	path := store.objectPath(object.BucketID, object.Key)
+	backupPath := ""
+	if info, err := os.Lstat(path); err == nil {
+		if info.IsDir() {
+			return ErrBlobObjectCorrupt
+		}
+		var moveErr error
+		backupPath, moveErr = moveBlobToBackup(path)
+		if moveErr != nil {
+			return moveErr
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return ErrBlobStoreIO
+	}
+
+	delete(store.objects, mapKey)
+	if err := store.saveLocked(); err != nil {
+		store.objects[mapKey] = object
+		if rollbackErr := rollbackBlobPayload(path, backupPath); rollbackErr != nil {
+			return rollbackErr
+		}
+		return err
+	}
+	if backupPath != "" {
+		_ = os.Remove(backupPath)
+	}
+	removeEmptyBlobDirectories(filepath.Dir(path), store.objectsRoot())
+	return nil
 }
 
 func (store *FileBlobStore) Delete(ctx context.Context, bucketID, objectKey string) error {

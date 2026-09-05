@@ -371,3 +371,67 @@ func TestFileBlobStoreRejectsRecoveryChecksumMismatchAndReportsMetadataTampering
 		t.Fatalf("Get(after rejected recovery) error = %v, want ErrBlobObjectCorrupt", err)
 	}
 }
+
+func TestFileBlobStoreCleansExpiredAndCorruptObjectsWithinOwnedBound(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	start := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	store, err := NewFileBlobStoreWithRetention(root, 128, time.Hour)
+	if err != nil {
+		t.Fatalf("NewFileBlobStoreWithRetention() error = %v", err)
+	}
+	store.now = func() time.Time { return start }
+
+	first := putBlob(t, store, "resource-1", "expired-a", []byte("expired-a"))
+	second := putBlob(t, store, "resource-1", "expired-b", []byte("expired-b"))
+	store.retention = 0
+	corrupt := putBlob(t, store, "resource-1", "z-corrupt", []byte("trusted"))
+	other := putBlob(t, store, "resource-2", "other", []byte("keep"))
+	keepPath := filepath.Join(root, "keep.txt")
+	if err := os.WriteFile(keepPath, []byte("unrelated"), 0o600); err != nil {
+		t.Fatalf("WriteFile(keep) error = %v", err)
+	}
+	if err := os.WriteFile(store.objectPath("resource-1", "z-corrupt"), []byte("tampered"), 0o600); err != nil {
+		t.Fatalf("WriteFile(corrupt) error = %v", err)
+	}
+
+	store.now = func() time.Time { return start.Add(time.Hour) }
+	firstRun, err := store.Cleanup(ctx, "resource-1", 1)
+	if err != nil {
+		t.Fatalf("Cleanup(first) error = %v", err)
+	}
+	if firstRun == nil || firstRun.Removed != 1 || firstRun.Expired != 1 || firstRun.Corrupt != 0 {
+		t.Fatalf("Cleanup(first) report = %#v, want one bounded expired removal", firstRun)
+	}
+	if _, err := os.Stat(store.objectPath(first.BucketID, first.Key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("first expired payload stat error = %v, want removed", err)
+	}
+	if _, err := os.Stat(store.objectPath(second.BucketID, second.Key)); err != nil {
+		t.Fatalf("second expired payload stat error = %v, want retained by bound", err)
+	}
+
+	reopened, err := NewFileBlobStoreWithRetention(root, 128, time.Hour)
+	if err != nil {
+		t.Fatalf("NewFileBlobStoreWithRetention(reopen) error = %v", err)
+	}
+	reopened.now = func() time.Time { return start.Add(time.Hour) }
+	secondRun, err := reopened.Cleanup(ctx, "resource-1", MaxBlobCleanupLimit)
+	if err != nil {
+		t.Fatalf("Cleanup(reopen) error = %v", err)
+	}
+	if secondRun == nil || secondRun.Removed != 2 || secondRun.Expired != 1 || secondRun.Corrupt != 1 {
+		t.Fatalf("Cleanup(reopen) report = %#v, want expired and corrupt removals", secondRun)
+	}
+	if repeated, err := reopened.Cleanup(ctx, "resource-1", MaxBlobCleanupLimit); err != nil || repeated.Removed != 0 {
+		t.Fatalf("Cleanup(repeat) = %#v, %v; want idempotent empty run", repeated, err)
+	}
+	if _, _, err := reopened.Get(ctx, other.BucketID, other.Key); err != nil {
+		t.Fatalf("Get(other bucket) error = %v, want ownership-scoped preservation", err)
+	}
+	if _, err := os.Stat(keepPath); err != nil {
+		t.Fatalf("unrelated residue stat error = %v", err)
+	}
+	if _, err := os.Stat(reopened.objectPath(corrupt.BucketID, corrupt.Key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupt payload stat error = %v, want removed", err)
+	}
+}
