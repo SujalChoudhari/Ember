@@ -97,17 +97,20 @@ type DeadLetterStore interface {
 }
 
 type deadLetterDiskState struct {
-	Version int                `json:"version"`
-	Records []DeadLetterRecord `json:"records"`
+	Version  int                 `json:"version"`
+	Records  []DeadLetterRecord  `json:"records"`
+	Redrives []redriveDiskRecord `json:"redrives,omitempty"`
 }
 
 // FileDeadLetterStore persists bounded, payload-redacted dead-letter metadata
 // in one private JSON snapshot.
 type FileDeadLetterStore struct {
-	mu      sync.RWMutex
-	path    string
-	options DeadLetterStoreOptions
-	records []DeadLetterRecord
+	mu       sync.RWMutex
+	path     string
+	options  DeadLetterStoreOptions
+	records  []DeadLetterRecord
+	redrives []redriveDiskRecord
+	inflight map[string]struct{}
 }
 
 func NewFileDeadLetterStore(path string, options DeadLetterStoreOptions) (*FileDeadLetterStore, error) {
@@ -127,7 +130,7 @@ func NewFileDeadLetterStore(path string, options DeadLetterStoreOptions) (*FileD
 		return nil, ErrDeadLetterStoreIO
 	}
 
-	store := &FileDeadLetterStore{path: path, options: normalized}
+	store := &FileDeadLetterStore{path: path, options: normalized, inflight: make(map[string]struct{})}
 	if err := store.load(); err != nil {
 		return nil, err
 	}
@@ -170,14 +173,29 @@ func (store *FileDeadLetterStore) load() error {
 		}
 		seen[record.DeliveryID] = struct{}{}
 	}
+	redriveIDs := make(map[string]struct{}, len(state.Redrives))
+	if len(state.Redrives) > store.options.MaxRecords {
+		return ErrDeadLetterStoreCorrupt
+	}
+	for _, redrive := range state.Redrives {
+		if err := redrive.validate(); err != nil {
+			return ErrDeadLetterStoreCorrupt
+		}
+		if _, exists := redriveIDs[redrive.RequestID]; exists {
+			return ErrDeadLetterStoreCorrupt
+		}
+		redriveIDs[redrive.RequestID] = struct{}{}
+	}
 	store.records = append([]DeadLetterRecord(nil), state.Records...)
+	store.redrives = append([]redriveDiskRecord(nil), state.Redrives...)
 	return nil
 }
 
 func (store *FileDeadLetterStore) saveLocked() error {
 	data, err := json.MarshalIndent(deadLetterDiskState{
-		Version: deadLetterStoreVersion,
-		Records: store.records,
+		Version:  deadLetterStoreVersion,
+		Records:  store.records,
+		Redrives: store.redrives,
 	}, "", "  ")
 	if err != nil {
 		return ErrDeadLetterStoreIO
