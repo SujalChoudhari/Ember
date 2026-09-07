@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
+	"github.com/SujalChoudhari/Ember/internal/ember/operationcontext"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
 
@@ -410,5 +411,43 @@ func TestResourceOperationCoordinatorRejectsInvalidRequestsBeforeEffect(t *testi
 	}
 	if calls != 0 {
 		t.Fatalf("effect calls after rejected requests = %d, want 0", calls)
+	}
+}
+
+func TestResourceOperationCoordinatorPropagatesGeneratedIdentityToEffect(t *testing.T) {
+	operations, err := persistence.NewFileOperationStore(filepath.Join(t.TempDir(), "operations.json"))
+	if err != nil {
+		t.Fatalf("NewFileOperationStore() error = %v", err)
+	}
+	audits, err := persistence.NewFileAuditStore(filepath.Join(t.TempDir(), "audit.json"))
+	if err != nil {
+		t.Fatalf("NewFileAuditStore() error = %v", err)
+	}
+	coordinator, err := NewResourceOperationCoordinator(operations, audits)
+	if err != nil {
+		t.Fatalf("NewResourceOperationCoordinator() error = %v", err)
+	}
+
+	request := ResourceOperationRequest{
+		ResourceID:    "resource-1",
+		ScopeID:       "scope-1",
+		Action:        "resource.update",
+		RequestID:     "request-1",
+		CorrelationID: "correlation-1",
+	}
+	var observed operationcontext.Identity
+	var found bool
+	result, err := coordinator.Execute(context.Background(), request, func(ctx context.Context) error {
+		observed, found = operationcontext.From(ctx)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result == nil || !found {
+		t.Fatalf("Execute() identity = %#v, found = %v; want generated identity", observed, found)
+	}
+	if observed.OperationID != result.Operation.ID || observed.RequestID != request.RequestID || observed.CorrelationID != request.CorrelationID {
+		t.Fatalf("effect identity = %#v, operation = %#v, request = %#v; want consistent identifiers", observed, result.Operation, request)
 	}
 }
