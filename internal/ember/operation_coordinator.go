@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
+	"github.com/SujalChoudhari/Ember/internal/ember/operationcontext"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
 
@@ -136,7 +137,19 @@ func (coordinator *ResourceOperationCoordinator) Execute(ctx context.Context, re
 		return nil, err
 	}
 
-	effectErr := effect(ctx)
+	operationID, err := newOperationIdentifier()
+	if err != nil {
+		return nil, err
+	}
+	effectContext, err := operationcontext.With(ctx, operationcontext.Identity{
+		OperationID:   operationID,
+		RequestID:     request.RequestID,
+		CorrelationID: request.CorrelationID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	effectErr := effect(effectContext)
 	status := models.OperationStatusSucceeded
 	outcome := "succeeded"
 	if effectErr != nil {
@@ -145,10 +158,6 @@ func (coordinator *ResourceOperationCoordinator) Execute(ctx context.Context, re
 	}
 
 	createdAt := time.Now().UTC()
-	operationID, err := newOperationIdentifier()
-	if err != nil {
-		return nil, err
-	}
 	operation := models.Operation{
 		ID:            operationID,
 		ResourceID:    request.ResourceID,
