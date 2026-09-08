@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -424,6 +425,83 @@ func TestHTTPExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 	}
 	if response := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+root.ID, "", nil); response.Code != http.StatusNoContent {
 		t.Fatalf("DELETE root status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHTTPDeploymentFlowsMatchCLIContract(t *testing.T) {
+	document := `{"version":"v1","parameters":{"tier":{"type":"string"},"password":{"type":"secureString"}},"resources":[{"type":"group","name":"platform","tags":{"tier":"${parameters.tier}","password":"${parameters.password}"},"desiredState":"ready"}]}`
+	parameters := map[string]string{"tier": "test", "password": "secret-value"}
+
+	cliOperator := newTestOperator(t)
+	cliPlan := runOperatorCLI(t, cliOperator, "deployment", "plan", "--document", document, "--parameter", "tier=test", "--parameter", "password=secret-value")
+
+	httpOperator := newTestOperator(t)
+	httpHandler := NewHTTPHandler(httpOperator)
+	requestBody, err := json.Marshal(map[string]any{
+		"document":      json.RawMessage(document),
+		"parameters":    parameters,
+		"requestId":     "request-http-deployment",
+		"correlationId": "correlation-http-deployment",
+	})
+	if err != nil {
+		t.Fatalf("Marshal(deployment request) error = %v", err)
+	}
+	httpPlanRecorder := operatorHTTPCall(t, httpHandler, http.MethodPost, "/v1/deployments/plan", "", requestBody)
+	if httpPlanRecorder.Code != http.StatusOK {
+		t.Fatalf("POST /v1/deployments/plan status = %d, body = %s", httpPlanRecorder.Code, httpPlanRecorder.Body.String())
+	}
+	var httpPlan OperatorResponse
+	if err := json.Unmarshal(httpPlanRecorder.Body.Bytes(), &httpPlan); err != nil {
+		t.Fatalf("decode HTTP plan response error = %v", err)
+	}
+	if !reflect.DeepEqual(httpPlan.Plan, cliPlan.Plan) || !reflect.DeepEqual(httpPlan.Resolution, cliPlan.Resolution) {
+		t.Fatalf("HTTP plan = %#v, CLI plan = %#v; want shared safe contract", httpPlan, cliPlan)
+	}
+	if strings.Contains(httpPlanRecorder.Body.String(), "secret-value") || !strings.Contains(httpPlanRecorder.Body.String(), `"[REDACTED]"`) {
+		t.Fatalf("HTTP plan leaked or omitted redaction: %s", httpPlanRecorder.Body.String())
+	}
+
+	cliApplyOperator := newTestOperator(t)
+	cliApply := runOperatorCLI(t, cliApplyOperator, "deployment", "apply", "--document", document, "--parameter", "tier=test", "--parameter", "password=secret-value", "--request-id", "request-deployment", "--correlation-id", "correlation-deployment")
+	httpApplyOperator := newTestOperator(t)
+	httpApplyHandler := NewHTTPHandler(httpApplyOperator)
+	applyBody, err := json.Marshal(map[string]any{
+		"document":      json.RawMessage(document),
+		"parameters":    parameters,
+		"requestId":     "request-deployment",
+		"correlationId": "correlation-deployment",
+	})
+	if err != nil {
+		t.Fatalf("Marshal(apply request) error = %v", err)
+	}
+	httpApplyRecorder := operatorHTTPCall(t, httpApplyHandler, http.MethodPost, "/v1/deployments/apply", "", applyBody)
+	if httpApplyRecorder.Code != http.StatusOK {
+		t.Fatalf("POST /v1/deployments/apply status = %d, body = %s", httpApplyRecorder.Code, httpApplyRecorder.Body.String())
+	}
+	var httpApply OperatorResponse
+	if err := json.Unmarshal(httpApplyRecorder.Body.Bytes(), &httpApply); err != nil {
+		t.Fatalf("decode HTTP apply response error = %v", err)
+	}
+	if httpApply.Apply == nil || cliApply.Apply == nil || !reflect.DeepEqual(httpApply.Apply.Plan, cliApply.Apply.Plan) || !reflect.DeepEqual(httpApply.Resolution, cliApply.Resolution) || len(httpApply.Apply.Operations) != len(cliApply.Apply.Operations) {
+		t.Fatalf("HTTP apply = %#v, CLI apply = %#v; want shared safe contract", httpApply, cliApply)
+	}
+	if httpApply.Apply.Operations[0].RequestID != cliApply.Apply.Operations[0].RequestID || httpApply.Apply.Operations[0].CorrelationID != cliApply.Apply.Operations[0].CorrelationID || strings.Contains(httpApplyRecorder.Body.String(), "secret-value") {
+		t.Fatalf("HTTP apply contract = %s, want bounded redacted output", httpApplyRecorder.Body.String())
+	}
+
+	var invalidCLIOutput bytes.Buffer
+	invalidDocument := `{"version":"unsupported","resources":[]}`
+	cliErr := RunCLI(context.Background(), cliOperator, []string{"deployment", "plan", "--document", invalidDocument}, &invalidCLIOutput)
+	if cliErr == nil {
+		t.Fatal("RunCLI(invalid plan) error = nil, want validation error")
+	}
+	invalidBody, err := json.Marshal(map[string]any{"document": json.RawMessage(invalidDocument)})
+	if err != nil {
+		t.Fatalf("Marshal(invalid request) error = %v", err)
+	}
+	invalidHTTP := operatorHTTPCall(t, httpHandler, http.MethodPost, "/v1/deployments/plan", "", invalidBody)
+	if invalidHTTP.Code != http.StatusBadRequest || invalidHTTP.Body.String() != `{"error":"`+cliErr.Error()+`"}`+"\n" {
+		t.Fatalf("HTTP invalid plan = %d %s, CLI error = %v; want semantic parity", invalidHTTP.Code, invalidHTTP.Body.String(), cliErr)
 	}
 }
 

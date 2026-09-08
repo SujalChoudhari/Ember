@@ -55,6 +55,13 @@ type resourceLockRequest struct {
 	Token string `json:"token"`
 }
 
+type deploymentRequest struct {
+	Document      json.RawMessage   `json:"document"`
+	Parameters    map[string]string `json:"parameters"`
+	RequestID     string            `json:"requestId"`
+	CorrelationID string            `json:"correlationId"`
+}
+
 func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if handler.operator == nil {
 		writeOperatorError(writer, http.StatusInternalServerError, ErrInvalidOperator)
@@ -73,6 +80,24 @@ func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, reques
 			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 			return
 		}
+	}
+	if request.URL.Path == "/v1/deployments/plan" {
+		if request.Method != http.MethodPost {
+			writer.Header().Set("Allow", http.MethodPost)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+		handler.planDeployment(writer, request)
+		return
+	}
+	if request.URL.Path == "/v1/deployments/apply" {
+		if request.Method != http.MethodPost {
+			writer.Header().Set("Allow", http.MethodPost)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+		handler.applyDeployment(writer, request)
+		return
 	}
 	if request.URL.Path == "/v1/operations" && request.Method == http.MethodGet {
 		handler.listOperations(writer, request)
@@ -151,6 +176,57 @@ func (handler *operatorHTTPHandler) createResource(writer http.ResponseWriter, r
 		return
 	}
 	writeOperatorJSON(writer, http.StatusCreated, &OperatorResponse{Resource: resource})
+}
+
+func (handler *operatorHTTPHandler) decodeDeploymentRequest(writer http.ResponseWriter, request *http.Request) (deploymentRequest, error) {
+	var body deploymentRequest
+	if err := decodeOperatorJSON(writer, request, &body); err != nil {
+		return deploymentRequest{}, err
+	}
+	if len(body.Document) == 0 {
+		return deploymentRequest{}, deployment.ErrMalformedDocument
+	}
+	return body, nil
+}
+
+func (handler *operatorHTTPHandler) planDeployment(writer http.ResponseWriter, request *http.Request) {
+	body, err := handler.decodeDeploymentRequest(writer, request)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	resolution, plan, err := handler.operator.planDeployment(request.Context(), operatorPrincipal(request), body.Document, body.Parameters)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	resolved := resolution.Document()
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Plan: &plan, Resolution: &resolved})
+}
+
+func (handler *operatorHTTPHandler) applyDeployment(writer http.ResponseWriter, request *http.Request) {
+	body, err := handler.decodeDeploymentRequest(writer, request)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	result, resolution, err := handler.operator.applyDeployment(request.Context(), operatorPrincipal(request), body.Document, body.Parameters, deployment.ApplyOptions{
+		RequestID:     body.RequestID,
+		CorrelationID: body.CorrelationID,
+	})
+	if result == nil {
+		if err == nil {
+			err = ErrOperatorDeploymentApply
+		}
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	resolved := resolution.Document()
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Apply: result, Resolution: &resolved})
 }
 
 func (handler *operatorHTTPHandler) listResources(writer http.ResponseWriter, request *http.Request) {
@@ -614,10 +690,10 @@ func operatorErrorStatus(err error) int {
 	if errors.Is(err, persistence.ErrResourceNotFound) || errors.Is(err, persistence.ErrOperationNotFound) || errors.Is(err, persistence.ErrBlobObjectNotFound) || errors.Is(err, persistence.ErrApplyProgressNotFound) || errors.Is(err, persistence.ErrRecoveryNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, persistence.ErrResourceLockConflict) || errors.Is(err, persistence.ErrResourceLockNotHeld) || errors.Is(err, persistence.ErrResourceLockNotOwner) || errors.Is(err, persistence.ErrResourceLocked) || errors.Is(err, persistence.ErrResourceHasDependents) || errors.Is(err, persistence.ErrOperationRequestConflict) || errors.Is(err, persistence.ErrRecoveryRequestConflict) {
+	if errors.Is(err, persistence.ErrResourceLockConflict) || errors.Is(err, persistence.ErrResourceLockNotHeld) || errors.Is(err, persistence.ErrResourceLockNotOwner) || errors.Is(err, persistence.ErrResourceLocked) || errors.Is(err, persistence.ErrResourceHasDependents) || errors.Is(err, persistence.ErrOperationRequestConflict) || errors.Is(err, persistence.ErrRecoveryRequestConflict) || errors.Is(err, deployment.ErrDestructiveApprovalRequired) {
 		return http.StatusConflict
 	}
-	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) || errors.Is(err, persistence.ErrInvalidBlobListLimit) || errors.Is(err, persistence.ErrInvalidApplyProgressListLimit) || errors.Is(err, persistence.ErrInvalidRecoveryListLimit) || errors.Is(err, deployment.ErrInvalidRecoveryRequest) || errors.Is(err, deployment.ErrUnsupportedRecoveryFailure) || errors.Is(err, deployment.ErrRecoveryApplyNotReady) {
+	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) || errors.Is(err, persistence.ErrInvalidBlobListLimit) || errors.Is(err, persistence.ErrInvalidApplyProgressListLimit) || errors.Is(err, persistence.ErrInvalidRecoveryListLimit) || errors.Is(err, deployment.ErrMalformedDocument) || errors.Is(err, deployment.ErrDocumentTooLarge) || errors.Is(err, deployment.ErrInvalidDocument) || errors.Is(err, deployment.ErrInvalidResolution) || errors.Is(err, deployment.ErrInvalidApplyRequest) || errors.Is(err, deployment.ErrApplyDependency) || errors.Is(err, deployment.ErrInvalidRecoveryRequest) || errors.Is(err, deployment.ErrUnsupportedRecoveryFailure) || errors.Is(err, deployment.ErrRecoveryApplyNotReady) {
 		return http.StatusBadRequest
 	}
 	if errors.Is(err, persistence.ErrBlobObjectTooLarge) || errors.Is(err, persistence.ErrBlobQuotaExceeded) {
