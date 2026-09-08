@@ -227,10 +227,10 @@ func TestHTTPOperationBlobAndResetFlow(t *testing.T) {
 		t.Fatalf("range response content = %q, want world", rangeResponse.Content)
 	}
 
-	if reset := operatorHTTPCall(t, handler, http.MethodPost, "/v1/reset", group.ID, nil); reset.Code != http.StatusForbidden {
+	if reset := operatorHTTPCall(t, handler, http.MethodPost, "/v1/reset?confirm=true", group.ID, nil); reset.Code != http.StatusForbidden {
 		t.Fatalf("scoped reset status = %d, body = %s", reset.Code, reset.Body.String())
 	}
-	if reset := operatorHTTPCall(t, handler, http.MethodPost, "/v1/reset", "", nil); reset.Code != http.StatusNoContent {
+	if reset := operatorHTTPCall(t, handler, http.MethodPost, "/v1/reset?confirm=true", "", nil); reset.Code != http.StatusNoContent {
 		t.Fatalf("root reset status = %d, body = %s", reset.Code, reset.Body.String())
 	}
 	if missing := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources/"+group.ID, "", nil); missing.Code != http.StatusNotFound {
@@ -355,7 +355,7 @@ func TestHTTPExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 		t.Fatalf("HTTP scoped list = %#v, want child resource", scopedResponse)
 	}
 
-	dependentDelete := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+root.ID, "", nil)
+	dependentDelete := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+root.ID+"?confirm=true", "", nil)
 	if dependentDelete.Code != http.StatusConflict {
 		t.Fatalf("DELETE dependent root status = %d, body = %s", dependentDelete.Code, dependentDelete.Body.String())
 	}
@@ -399,7 +399,7 @@ func TestHTTPExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 	if lockedUpdate.Code != http.StatusConflict {
 		t.Fatalf("PATCH locked child status = %d, body = %s", lockedUpdate.Code, lockedUpdate.Body.String())
 	}
-	lockedDelete := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+child.ID, root.ID, nil)
+	lockedDelete := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+child.ID+"?confirm=true", root.ID, nil)
 	if lockedDelete.Code != http.StatusConflict {
 		t.Fatalf("DELETE locked child status = %d, body = %s", lockedDelete.Code, lockedDelete.Body.String())
 	}
@@ -420,10 +420,10 @@ func TestHTTPExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 	if release.Code != http.StatusNoContent {
 		t.Fatalf("DELETE owned lock status = %d, body = %s", release.Code, release.Body.String())
 	}
-	if response := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+child.ID, root.ID, nil); response.Code != http.StatusNoContent {
+	if response := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+child.ID+"?confirm=true", root.ID, nil); response.Code != http.StatusNoContent {
 		t.Fatalf("DELETE leaf status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if response := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+root.ID, "", nil); response.Code != http.StatusNoContent {
+	if response := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+root.ID+"?confirm=true", "", nil); response.Code != http.StatusNoContent {
 		t.Fatalf("DELETE root status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
@@ -581,17 +581,67 @@ func TestHTTPExposesCompleteBlobLifecycle(t *testing.T) {
 		t.Fatalf("GET invalid blob list limit status = %d, body = %s", invalidLimit.Code, invalidLimit.Body.String())
 	}
 
-	deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/buckets/"+bucket.ID+"/objects/nested/file.txt", group.ID, nil)
+	deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/buckets/"+bucket.ID+"/objects/nested/file.txt?confirm=true", group.ID, nil)
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("DELETE blob status = %d, body = %s", deleted.Code, deleted.Body.String())
 	}
 	if missing := operatorHTTPCall(t, handler, http.MethodGet, "/v1/buckets/"+bucket.ID+"/objects/nested/file.txt", group.ID, nil); missing.Code != http.StatusNotFound {
 		t.Fatalf("GET deleted blob status = %d, body = %s", missing.Code, missing.Body.String())
 	}
-	if reset := operatorHTTPCall(t, handler, http.MethodPost, "/v1/reset", "", nil); reset.Code != http.StatusNoContent {
+	if reset := operatorHTTPCall(t, handler, http.MethodPost, "/v1/reset?confirm=true", "", nil); reset.Code != http.StatusNoContent {
 		t.Fatalf("POST reset status = %d, body = %s", reset.Code, reset.Body.String())
 	}
 	if missingResource := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources/"+group.ID, "", nil); missingResource.Code != http.StatusNotFound {
 		t.Fatalf("GET resource after reset status = %d, body = %s", missingResource.Code, missingResource.Body.String())
+	}
+}
+
+func TestHTTPDestructiveActionsRequireExplicitConfirmationAndSharedLimits(t *testing.T) {
+	operator := newTestOperator(t)
+	handler := NewHTTPHandler(operator)
+
+	created := operatorHTTPCall(t, handler, http.MethodPost, "/v1/resources", "", []byte(`{"type":"group","name":"platform"}`))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", created.Code, created.Body.String())
+	}
+	var envelope OperatorResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode create response error = %v", err)
+	}
+
+	if rejected := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+envelope.Resource.ID, "", nil); rejected.Code != http.StatusConflict {
+		t.Fatalf("DELETE without confirmation status = %d, body = %s", rejected.Code, rejected.Body.String())
+	}
+	if rejected := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources/"+envelope.Resource.ID, "", nil); rejected.Code != http.StatusOK {
+		t.Fatalf("resource after rejected delete status = %d, body = %s", rejected.Code, rejected.Body.String())
+	}
+	if confirmed := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/resources/"+envelope.Resource.ID+"?confirm=true", "", nil); confirmed.Code != http.StatusNoContent {
+		t.Fatalf("DELETE with confirmation status = %d, body = %s", confirmed.Code, confirmed.Body.String())
+	}
+	if invalidLimit := operatorHTTPCall(t, handler, http.MethodGet, "/v1/resources?limit=101", "", nil); invalidLimit.Code != http.StatusBadRequest {
+		t.Fatalf("GET over-limit status = %d, body = %s", invalidLimit.Code, invalidLimit.Body.String())
+	}
+
+	if rejected := operatorHTTPCall(t, handler, http.MethodPost, "/v1/reset", "", nil); rejected.Code != http.StatusConflict {
+		t.Fatalf("POST reset without confirmation status = %d, body = %s", rejected.Code, rejected.Body.String())
+	}
+	if confirmed := operatorHTTPCall(t, handler, http.MethodPost, "/v1/reset?confirm=true", "", nil); confirmed.Code != http.StatusNoContent {
+		t.Fatalf("POST reset with confirmation status = %d, body = %s", confirmed.Code, confirmed.Body.String())
+	}
+}
+
+func TestHTTPDeploymentDestructiveApplyRequiresConfirmation(t *testing.T) {
+	operator := newTestOperator(t)
+	handler := NewHTTPHandler(operator)
+	if _, err := operator.CreateResource(context.Background(), OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "platform"}); err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+	body := []byte(`{"document":{"version":"v1","resources":[]}}`)
+	if rejected := operatorHTTPCall(t, handler, http.MethodPost, "/v1/deployments/apply", "", body); rejected.Code != http.StatusConflict {
+		t.Fatalf("deployment apply without confirmation status = %d, body = %s", rejected.Code, rejected.Body.String())
+	}
+	confirmedBody := []byte(`{"document":{"version":"v1","resources":[]},"confirm":true}`)
+	if confirmed := operatorHTTPCall(t, handler, http.MethodPost, "/v1/deployments/apply", "", confirmedBody); confirmed.Code != http.StatusOK {
+		t.Fatalf("deployment apply with confirmation status = %d, body = %s", confirmed.Code, confirmed.Body.String())
 	}
 }

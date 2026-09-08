@@ -20,7 +20,18 @@ var (
 	ErrOperatorBucketRequired          = errors.New("operator resource is not a bucket")
 	ErrOperatorBlobRecoveryUnavailable = errors.New("operator blob recovery unavailable")
 	ErrOperatorDeploymentUnavailable   = errors.New("operator deployment inspection unavailable")
+	ErrDestructiveConfirmationRequired = errors.New("explicit confirmation is required for destructive actions")
+	ErrInvalidOperatorListLimit        = errors.New("invalid operator list limit")
 )
+
+const MaxOperatorListLimit = 100
+
+func validateOperatorListLimit(limit int) error {
+	if limit <= 0 || limit > MaxOperatorListLimit {
+		return ErrInvalidOperatorListLimit
+	}
+	return nil
+}
 
 type OperatorPrincipal struct {
 	ScopeID string

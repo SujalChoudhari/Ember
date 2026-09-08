@@ -9,6 +9,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
 
@@ -119,10 +120,10 @@ func TestCLIExposesBlobInspectionAndResetContract(t *testing.T) {
 		t.Fatalf("CLI audit response = %#v, want one linked entry", audit)
 	}
 
-	if _, err := runOperatorCLIResult(t, operator, "reset", "--scope", group.Resource.ID); !errors.Is(err, ErrOperatorScopeDenied) {
+	if _, err := runOperatorCLIResult(t, operator, "reset", "--scope", group.Resource.ID, "--confirm"); !errors.Is(err, ErrOperatorScopeDenied) {
 		t.Fatalf("CLI scoped reset error = %v, want ErrOperatorScopeDenied", err)
 	}
-	if _, err := runOperatorCLIResult(t, operator, "reset"); err != nil {
+	if _, err := runOperatorCLIResult(t, operator, "reset", "--confirm"); err != nil {
 		t.Fatalf("CLI root reset error = %v", err)
 	}
 }
@@ -147,7 +148,7 @@ func TestCLIExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 	if updated.Resource == nil || updated.Resource.ID != child.ID || updated.Resource.Spec.Tags["tier"] != "test" {
 		t.Fatalf("CLI tag update = %#v, want immutable identity and updated tags", updated)
 	}
-	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--id", root.ID); !errors.Is(err, persistence.ErrResourceHasDependents) {
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--id", root.ID, "--confirm"); !errors.Is(err, persistence.ErrResourceHasDependents) {
 		t.Fatalf("CLI delete dependent root error = %v, want dependent refusal", err)
 	}
 
@@ -168,7 +169,7 @@ func TestCLIExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 	if _, err := runOperatorCLIResult(t, operator, "resource", "create", "--scope", root.ID, "--parent", root.ID, "--type", "group", "--name", "blocked"); !errors.Is(err, persistence.ErrResourceLocked) {
 		t.Fatalf("CLI locked create error = %v, want resource lock", err)
 	}
-	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--scope", root.ID, "--id", child.ID); !errors.Is(err, persistence.ErrResourceLocked) {
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--scope", root.ID, "--id", child.ID, "--confirm"); !errors.Is(err, persistence.ErrResourceLocked) {
 		t.Fatalf("CLI locked delete error = %v, want resource lock", err)
 	}
 	if _, err := runOperatorCLIResult(t, operator, "resource", "lock", "inspect", "--scope", other.ID, "--id", root.ID); !errors.Is(err, ErrOperatorScopeDenied) {
@@ -180,10 +181,10 @@ func TestCLIExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 	if _, err := runOperatorCLIResult(t, operator, "resource", "lock", "release", "--id", root.ID, "--owner", "operator", "--token", "lock-token"); err != nil {
 		t.Fatalf("CLI lock release error = %v", err)
 	}
-	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--scope", root.ID, "--id", child.ID); err != nil {
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--scope", root.ID, "--id", child.ID, "--confirm"); err != nil {
 		t.Fatalf("CLI leaf delete error = %v", err)
 	}
-	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--id", root.ID); err != nil {
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--id", root.ID, "--confirm"); err != nil {
 		t.Fatalf("CLI root delete after leaf error = %v", err)
 	}
 }
@@ -211,20 +212,20 @@ func TestCLIExposesCompleteBlobLifecycle(t *testing.T) {
 	if len(listed.Objects) != 2 || listed.Objects[0].Key != "a.txt" || listed.Objects[1].Key != "z.txt" {
 		t.Fatalf("CLI blob list = %#v, want sorted bounded objects", listed)
 	}
-	if _, err := runOperatorCLIResult(t, operator, "blob", "list", "--scope", group.ID, "--bucket", bucket.ID, "--limit", "0"); !errors.Is(err, persistence.ErrInvalidBlobListLimit) {
+	if _, err := runOperatorCLIResult(t, operator, "blob", "list", "--scope", group.ID, "--bucket", bucket.ID, "--limit", "0"); !errors.Is(err, ErrInvalidOperatorListLimit) {
 		t.Fatalf("CLI invalid blob list limit error = %v, want invalid limit", err)
 	}
 	if _, err := runOperatorCLIResult(t, operator, "blob", "list", "--scope", other.ID, "--bucket", bucket.ID, "--limit", "10"); !errors.Is(err, ErrOperatorScopeDenied) {
 		t.Fatalf("CLI blob list cross-scope error = %v, want scope denial", err)
 	}
 
-	if _, err := runOperatorCLIResult(t, operator, "blob", "delete", "--scope", group.ID, "--bucket", bucket.ID, "--key", "a.txt"); err != nil {
+	if _, err := runOperatorCLIResult(t, operator, "blob", "delete", "--scope", group.ID, "--bucket", bucket.ID, "--key", "a.txt", "--confirm"); err != nil {
 		t.Fatalf("CLI blob delete error = %v", err)
 	}
 	if _, err := runOperatorCLIResult(t, operator, "blob", "get", "--scope", group.ID, "--bucket", bucket.ID, "--key", "a.txt"); !errors.Is(err, persistence.ErrBlobObjectNotFound) {
 		t.Fatalf("CLI deleted blob get error = %v, want object not found", err)
 	}
-	if _, err := runOperatorCLIResult(t, operator, "blob", "delete", "--scope", other.ID, "--bucket", bucket.ID, "--key", "z.txt"); !errors.Is(err, ErrOperatorScopeDenied) {
+	if _, err := runOperatorCLIResult(t, operator, "blob", "delete", "--scope", other.ID, "--bucket", bucket.ID, "--key", "z.txt", "--confirm"); !errors.Is(err, ErrOperatorScopeDenied) {
 		t.Fatalf("CLI blob delete cross-scope error = %v, want scope denial", err)
 	}
 }
@@ -281,5 +282,44 @@ func TestCLIExposesDeploymentPlanAndApplyLifecycle(t *testing.T) {
 	resources := runOperatorCLI(t, operator, "resource", "list", "--limit", "10")
 	if len(resources.Resources) != 1 || resources.Resources[0].Spec.Tags["tier"] != "test" || resources.Resources[0].Spec.Tags["password"] == "secret-value" {
 		t.Fatalf("CLI applied resources = %#v, want redacted resource state", resources)
+	}
+}
+
+func TestCLIDestructiveActionsRequireExplicitConfirmation(t *testing.T) {
+	operator := newTestOperator(t)
+	resource := runOperatorCLI(t, operator, "resource", "create", "--type", "group", "--name", "platform").Resource
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--id", resource.ID); !errors.Is(err, ErrDestructiveConfirmationRequired) {
+		t.Fatalf("CLI resource delete without confirmation error = %v, want confirmation error", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "delete", "--id", resource.ID, "--confirm"); err != nil {
+		t.Fatalf("CLI confirmed resource delete error = %v", err)
+	}
+
+	operator, err := NewFileOperator(t.TempDir(), 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	group := runOperatorCLI(t, operator, "resource", "create", "--type", "group", "--name", "platform").Resource
+	bucket := runOperatorCLI(t, operator, "resource", "create", "--scope", group.ID, "--parent", group.ID, "--type", "bucket", "--name", "assets").Resource
+	if _, err := runOperatorCLIResult(t, operator, "blob", "delete", "--scope", group.ID, "--bucket", bucket.ID, "--key", "object"); !errors.Is(err, ErrDestructiveConfirmationRequired) {
+		t.Fatalf("CLI blob delete without confirmation error = %v, want confirmation error", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "reset"); !errors.Is(err, ErrDestructiveConfirmationRequired) {
+		t.Fatalf("CLI reset without confirmation error = %v, want confirmation error", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "reset", "--confirm"); err != nil {
+		t.Fatalf("CLI confirmed reset error = %v", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "resource", "list", "--limit", "101"); !errors.Is(err, ErrInvalidOperatorListLimit) {
+		t.Fatalf("CLI over-limit list error = %v, want shared limit error", err)
+	}
+
+	operator = newTestOperator(t)
+	_ = runOperatorCLI(t, operator, "resource", "create", "--type", "group", "--name", "platform")
+	if _, err := runOperatorCLIResult(t, operator, "deployment", "apply", "--document", `{"version":"v1","resources":[]}`); !errors.Is(err, deployment.ErrDestructiveApprovalRequired) {
+		t.Fatalf("CLI deployment apply without confirmation error = %v, want approval error", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "deployment", "apply", "--document", `{"version":"v1","resources":[]}`, "--confirm"); err != nil {
+		t.Fatalf("CLI confirmed deployment apply error = %v", err)
 	}
 }

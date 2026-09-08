@@ -12,7 +12,6 @@ import (
 
 	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
-	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
 
 var (
@@ -178,6 +177,7 @@ func runCLIDeploymentApply(ctx context.Context, operator *Operator, args []strin
 	path := set.String("file", "", "deployment document path")
 	requestID := set.String("request-id", "", "idempotency request ID")
 	correlationID := set.String("correlation-id", "", "correlation ID")
+	confirm := set.Bool("confirm", false, "confirm destructive changes")
 	var parameterValues []string
 	set.Func("parameter", "deployment parameter in name=value form", func(value string) error {
 		parameterValues = append(parameterValues, value)
@@ -195,7 +195,7 @@ func runCLIDeploymentApply(ctx context.Context, operator *Operator, args []strin
 		return err
 	}
 	result, resolution, err := operator.applyDeployment(ctx, OperatorPrincipal{ScopeID: *scopeID}, data, parameters, deployment.ApplyOptions{
-		RequestID: *requestID, CorrelationID: *correlationID,
+		RequestID: *requestID, CorrelationID: *correlationID, ApproveDestructive: *confirm,
 	})
 	if result == nil {
 		return err
@@ -224,9 +224,12 @@ func runCLIGetApplyProgress(ctx context.Context, operator *Operator, args []stri
 func runCLIListApplyProgress(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("deployment apply-progress list")
 	scopeID := set.String("scope", "", "operator scope")
-	limit := set.Int("limit", persistence.MaxApplyProgressListLimit, "maximum apply progress records")
+	limit := set.Int("limit", MaxOperatorListLimit, "maximum apply progress records")
 	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
 		return ErrInvalidCLIRequest
+	}
+	if err := requireCLIListLimit(*limit); err != nil {
+		return err
 	}
 	records, err := operator.ListApplyProgress(ctx, OperatorPrincipal{ScopeID: *scopeID}, *limit)
 	if err != nil {
@@ -266,9 +269,12 @@ func runCLIGetRecovery(ctx context.Context, operator *Operator, args []string, o
 func runCLIListRecoveries(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("deployment recovery list")
 	scopeID := set.String("scope", "", "operator scope")
-	limit := set.Int("limit", persistence.MaxRecoveryListLimit, "maximum recovery records")
+	limit := set.Int("limit", MaxOperatorListLimit, "maximum recovery records")
 	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
 		return ErrInvalidCLIRequest
+	}
+	if err := requireCLIListLimit(*limit); err != nil {
+		return err
 	}
 	records, err := operator.ListRecoveries(ctx, OperatorPrincipal{ScopeID: *scopeID}, *limit)
 	if err != nil {
@@ -306,6 +312,10 @@ func requireNoCLIArgs(set *flag.FlagSet) error {
 		return ErrInvalidCLIRequest
 	}
 	return nil
+}
+
+func requireCLIListLimit(limit int) error {
+	return validateOperatorListLimit(limit)
 }
 
 func runCLICreateResource(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
@@ -360,11 +370,14 @@ func runCLIGetResource(ctx context.Context, operator *Operator, args []string, o
 func runCLIListResources(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("resource list")
 	scopeID := set.String("scope", "", "operator scope")
-	limit := set.Int("limit", persistence.MaxResourceListLimit, "maximum resources")
+	limit := set.Int("limit", MaxOperatorListLimit, "maximum resources")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
 	}
 	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	if err := requireCLIListLimit(*limit); err != nil {
 		return err
 	}
 	resources, err := operator.ListResources(ctx, OperatorPrincipal{ScopeID: *scopeID}, *limit)
@@ -378,11 +391,15 @@ func runCLIDeleteResource(ctx context.Context, operator *Operator, args []string
 	set := newCLIFlagSet("resource delete")
 	scopeID := set.String("scope", "", "operator scope")
 	resourceID := set.String("id", "", "resource ID")
+	confirm := set.Bool("confirm", false, "confirm resource deletion")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
 	}
 	if err := requireNoCLIArgs(set); err != nil {
 		return err
+	}
+	if !*confirm {
+		return ErrDestructiveConfirmationRequired
 	}
 	if err := operator.DeleteResource(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID); err != nil {
 		return err
@@ -566,11 +583,14 @@ func runCLIListBlobs(ctx context.Context, operator *Operator, args []string, out
 	set := newCLIFlagSet("blob list")
 	scopeID := set.String("scope", "", "operator scope")
 	bucketID := set.String("bucket", "", "bucket resource ID")
-	limit := set.Int("limit", persistence.MaxBlobListLimit, "maximum objects")
+	limit := set.Int("limit", MaxOperatorListLimit, "maximum objects")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
 	}
 	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	if err := requireCLIListLimit(*limit); err != nil {
 		return err
 	}
 	response, err := operator.ListBlobs(ctx, OperatorPrincipal{ScopeID: *scopeID}, *bucketID, *limit)
@@ -585,11 +605,15 @@ func runCLIDeleteBlob(ctx context.Context, operator *Operator, args []string, ou
 	scopeID := set.String("scope", "", "operator scope")
 	bucketID := set.String("bucket", "", "bucket resource ID")
 	objectKey := set.String("key", "", "object key")
+	confirm := set.Bool("confirm", false, "confirm object deletion")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
 	}
 	if err := requireNoCLIArgs(set); err != nil {
 		return err
+	}
+	if !*confirm {
+		return ErrDestructiveConfirmationRequired
 	}
 	if err := operator.DeleteBlob(ctx, OperatorPrincipal{ScopeID: *scopeID}, *bucketID, *objectKey); err != nil {
 		return err
@@ -618,11 +642,14 @@ func runCLIListOperations(ctx context.Context, operator *Operator, args []string
 	set := newCLIFlagSet("operation list")
 	scopeID := set.String("scope", "", "operator scope")
 	resourceID := set.String("resource", "", "resource ID")
-	limit := set.Int("limit", persistence.MaxOperationListLimit, "maximum operations")
+	limit := set.Int("limit", MaxOperatorListLimit, "maximum operations")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
 	}
 	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	if err := requireCLIListLimit(*limit); err != nil {
 		return err
 	}
 	operations, err := operator.ListOperations(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, *limit)
@@ -636,11 +663,14 @@ func runCLIListAudit(ctx context.Context, operator *Operator, args []string, out
 	set := newCLIFlagSet("audit list")
 	scopeID := set.String("scope", "", "operator scope")
 	resourceID := set.String("resource", "", "resource ID")
-	limit := set.Int("limit", persistence.MaxAuditListLimit, "maximum entries")
+	limit := set.Int("limit", MaxOperatorListLimit, "maximum entries")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
 	}
 	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	if err := requireCLIListLimit(*limit); err != nil {
 		return err
 	}
 	history, err := operator.ListAuditHistory(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, *limit)
@@ -653,11 +683,15 @@ func runCLIListAudit(ctx context.Context, operator *Operator, args []string, out
 func runCLIReset(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("reset")
 	scopeID := set.String("scope", "", "operator scope")
+	confirm := set.Bool("confirm", false, "confirm reset")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
 	}
 	if err := requireNoCLIArgs(set); err != nil {
 		return err
+	}
+	if !*confirm {
+		return ErrDestructiveConfirmationRequired
 	}
 	if err := operator.Reset(ctx, OperatorPrincipal{ScopeID: *scopeID}); err != nil {
 		return err
