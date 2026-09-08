@@ -237,6 +237,39 @@ func TestHTTPOperationBlobAndResetFlow(t *testing.T) {
 	}
 }
 
+func TestHTTPOperationInspectionListsCorrelatedScopedHistory(t *testing.T) {
+	operator := newTestOperator(t)
+	handler := NewHTTPHandler(operator)
+	ctx := context.Background()
+	root, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "root"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	child, err := operator.CreateResource(ctx, OperatorPrincipal{ScopeID: root.ID}, models.ResourceSpec{Type: models.ResourceTypeBucket, Name: "child", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("CreateResource(child) error = %v", err)
+	}
+	updated, err := operator.UpdateResourceTags(ctx, OperatorPrincipal{ScopeID: root.ID}, child.ID, map[string]string{"tier": "scoped"}, "request-http-scoped", "correlation-http-scoped")
+	if err != nil {
+		t.Fatalf("UpdateResourceTags() error = %v", err)
+	}
+
+	listed := operatorHTTPCall(t, handler, http.MethodGet, "/v1/operations?resourceId="+child.ID+"&limit=10", root.ID, nil)
+	if listed.Code != http.StatusOK {
+		t.Fatalf("GET operation list status = %d, body = %s", listed.Code, listed.Body.String())
+	}
+	var response OperatorResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode operation list response error = %v", err)
+	}
+	if len(response.Operations) != 1 || response.Operations[0].ID != updated.Operation.ID || response.Operations[0].CorrelationID != "correlation-http-scoped" || response.Operations[0].Status != models.OperationStatusSucceeded {
+		t.Fatalf("operation list response = %#v, want one correlated scoped operation", response)
+	}
+	if invalid := operatorHTTPCall(t, handler, http.MethodGet, "/v1/operations?resourceId="+child.ID+"&limit=0", root.ID, nil); invalid.Code != http.StatusBadRequest {
+		t.Fatalf("GET invalid operation list status = %d, body = %s", invalid.Code, invalid.Body.String())
+	}
+}
+
 func TestHTTPRejectsMalformedOversizedAndInvalidRangeRequests(t *testing.T) {
 	operator := newTestOperator(t)
 	handler := NewHTTPHandler(operator)

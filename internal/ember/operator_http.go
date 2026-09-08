@@ -74,6 +74,10 @@ func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, reques
 			return
 		}
 	}
+	if request.URL.Path == "/v1/operations" && request.Method == http.MethodGet {
+		handler.listOperations(writer, request)
+		return
+	}
 	if request.URL.Path == "/v1/reset" {
 		if request.Method != http.MethodPost {
 			writer.Header().Set("Allow", http.MethodPost)
@@ -333,6 +337,20 @@ func (handler *operatorHTTPHandler) getOperation(writer http.ResponseWriter, req
 		return
 	}
 	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Operation: operation})
+}
+
+func (handler *operatorHTTPHandler) listOperations(writer http.ResponseWriter, request *http.Request) {
+	limit, err := queryLimit(request, persistence.MaxOperationListLimit)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	operations, err := handler.operator.ListOperations(request.Context(), operatorPrincipal(request), request.URL.Query().Get("resourceId"), limit)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Operations: operations})
 }
 
 func deploymentRecordIDFromPath(path, prefix, message string) (string, error) {

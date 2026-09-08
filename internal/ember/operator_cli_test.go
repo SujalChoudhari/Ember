@@ -68,6 +68,10 @@ func TestCLIUsesSharedScopedResourceAndOperationContract(t *testing.T) {
 	if updated.Resource == nil || updated.Operation == nil || updated.Replayed || updated.Resource.Spec.Tags["tier"] != "test" {
 		t.Fatalf("CLI update response = %#v, want resource and operation", updated)
 	}
+	listed := runOperatorCLI(t, operator, "operation", "list", "--scope", created.Resource.ID, "--resource", created.Resource.ID, "--limit", "10")
+	if len(listed.Operations) != 1 || listed.Operations[0].ID != updated.Operation.ID || listed.Operations[0].CorrelationID != "correlation-cli-1" {
+		t.Fatalf("CLI operation list response = %#v, want correlated scoped operation", listed)
+	}
 
 	replayed := runOperatorCLI(t, operator, "resource", "update-tags",
 		"--id", created.Resource.ID,
