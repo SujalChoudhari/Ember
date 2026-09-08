@@ -258,3 +258,28 @@ func cliBlobDigest(value string) string {
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
 }
+
+func TestCLIExposesDeploymentPlanAndApplyLifecycle(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	document := `{"version":"v1","parameters":{"tier":{"type":"string"},"password":{"type":"secureString"}},"resources":[{"type":"group","name":"platform","tags":{"tier":"${parameters.tier}","password":"${parameters.password}"},"desiredState":"ready"}]}`
+
+	planned := runOperatorCLI(t, operator, "deployment", "plan", "--document", document, "--parameter", "tier=test", "--parameter", "password=secret-value")
+	if planned.Plan == nil || planned.Plan.Summary.Create != 1 || planned.Resolution == nil {
+		t.Fatalf("CLI deployment plan = %#v, want one create and safe resolution", planned)
+	}
+	if string(planned.Resolution.Resources[0].Spec.Tags["password"]) == "secret-value" {
+		t.Fatalf("CLI deployment plan exposed secure parameter: %#v", planned.Resolution)
+	}
+
+	applied := runOperatorCLI(t, operator, "deployment", "apply", "--document", document, "--parameter", "tier=test", "--parameter", "password=secret-value", "--request-id", "request-deployment-1", "--correlation-id", "correlation-deployment-1")
+	if applied.Apply == nil || len(applied.Apply.Operations) != 1 {
+		t.Fatalf("CLI deployment apply = %#v, want one operation", applied)
+	}
+	resources := runOperatorCLI(t, operator, "resource", "list", "--limit", "10")
+	if len(resources.Resources) != 1 || resources.Resources[0].Spec.Tags["tier"] != "test" || resources.Resources[0].Spec.Tags["password"] == "secret-value" {
+		t.Fatalf("CLI applied resources = %#v, want redacted resource state", resources)
+	}
+}

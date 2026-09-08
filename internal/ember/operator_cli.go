@@ -104,11 +104,18 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 }
 
 func runCLIDeployment(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
-	if len(args) < 2 {
+	if len(args) < 1 {
 		return ErrInvalidCLIRequest
 	}
 	switch args[0] {
+	case "plan":
+		return runCLIDeploymentPlan(ctx, operator, args[1:], output)
+	case "apply":
+		return runCLIDeploymentApply(ctx, operator, args[1:], output)
 	case "apply-progress":
+		if len(args) < 2 {
+			return ErrInvalidCLIRequest
+		}
 		switch args[1] {
 		case "get":
 			return runCLIGetApplyProgress(ctx, operator, args[2:], output)
@@ -133,6 +140,71 @@ func runCLIDeployment(ctx context.Context, operator *Operator, args []string, ou
 	default:
 		return ErrInvalidCLIRequest
 	}
+}
+
+func runCLIDeploymentPlan(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("deployment plan")
+	scopeID := set.String("scope", "", "operator scope")
+	inline := set.String("document", "", "inline JSON deployment document")
+	path := set.String("file", "", "deployment document path")
+	var parameterValues []string
+	set.Func("parameter", "deployment parameter in name=value form", func(value string) error {
+		parameterValues = append(parameterValues, value)
+		return nil
+	})
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	data, err := readCLIDeploymentDocument(*inline, *path)
+	if err != nil {
+		return err
+	}
+	parameters, err := parseCLIParameters(parameterValues)
+	if err != nil {
+		return err
+	}
+	resolution, plan, err := operator.planDeployment(ctx, OperatorPrincipal{ScopeID: *scopeID}, data, parameters)
+	if err != nil {
+		return err
+	}
+	resolved := resolution.Document()
+	return writeCLIResponse(output, &OperatorResponse{Plan: &plan, Resolution: &resolved})
+}
+
+func runCLIDeploymentApply(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("deployment apply")
+	scopeID := set.String("scope", "", "operator scope")
+	inline := set.String("document", "", "inline JSON deployment document")
+	path := set.String("file", "", "deployment document path")
+	requestID := set.String("request-id", "", "idempotency request ID")
+	correlationID := set.String("correlation-id", "", "correlation ID")
+	var parameterValues []string
+	set.Func("parameter", "deployment parameter in name=value form", func(value string) error {
+		parameterValues = append(parameterValues, value)
+		return nil
+	})
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	data, err := readCLIDeploymentDocument(*inline, *path)
+	if err != nil {
+		return err
+	}
+	parameters, err := parseCLIParameters(parameterValues)
+	if err != nil {
+		return err
+	}
+	result, resolution, err := operator.applyDeployment(ctx, OperatorPrincipal{ScopeID: *scopeID}, data, parameters, deployment.ApplyOptions{
+		RequestID: *requestID, CorrelationID: *correlationID,
+	})
+	if result == nil {
+		return err
+	}
+	resolved := resolution.Document()
+	if writeErr := writeCLIResponse(output, &OperatorResponse{Apply: result, Resolution: &resolved}); writeErr != nil {
+		return writeErr
+	}
+	return err
 }
 
 func runCLIGetApplyProgress(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
