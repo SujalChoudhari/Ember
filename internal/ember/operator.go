@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
@@ -33,11 +34,12 @@ func (principal OperatorPrincipal) validate() error {
 }
 
 type Operator struct {
-	resources  ResourceControlPlane
-	blobs      persistence.BlobStore
-	operations ResourceOperationControlPlane
-	reset      func(context.Context) error
-	deployment DeploymentControlPlane
+	resources     ResourceControlPlane
+	blobs         persistence.BlobStore
+	operations    ResourceOperationControlPlane
+	reset         func(context.Context) error
+	deployment    DeploymentControlPlane
+	applyProgress persistence.ApplyProgressStore
 }
 
 type OperatorResponse struct {
@@ -55,6 +57,9 @@ type OperatorResponse struct {
 	ApplyProgresses []models.ApplyProgressRecord `json:"applyProgresses,omitempty"`
 	Recovery        *models.RecoveryRecord       `json:"recovery,omitempty"`
 	Recoveries      []models.RecoveryRecord      `json:"recoveries,omitempty"`
+	Plan            *deployment.DeploymentPlan   `json:"plan,omitempty"`
+	Resolution      *deployment.ResolvedDocument `json:"resolution,omitempty"`
+	Apply           *deployment.ApplyResult      `json:"apply,omitempty"`
 	Replayed        bool                         `json:"replayed,omitempty"`
 }
 
@@ -112,6 +117,10 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	if err != nil {
 		return nil, err
 	}
+	progressStore, err := persistence.NewFileApplyProgressStore(filepath.Join(root, "apply-progress.json"))
+	if err != nil {
+		return nil, err
+	}
 	coordinator, err := NewResourceOperationCoordinator(operationStore, auditStore)
 	if err != nil {
 		return nil, err
@@ -128,7 +137,12 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 		}
 		return auditStore.Reset(ctx)
 	}
-	return NewOperator(resourceManager, blobStore, coordinator, reset)
+	operator, err := NewOperator(resourceManager, blobStore, coordinator, reset)
+	if err != nil {
+		return nil, err
+	}
+	operator.applyProgress = progressStore
+	return operator, nil
 }
 
 func (operator *Operator) CreateResource(ctx context.Context, principal OperatorPrincipal, spec models.ResourceSpec) (*models.Resource, error) {
