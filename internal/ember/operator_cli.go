@@ -78,10 +78,17 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 			return ErrInvalidCLIRequest
 		}
 	case "operation":
-		if len(args) < 2 || args[1] != "get" {
+		if len(args) < 2 {
 			return ErrInvalidCLIRequest
 		}
-		return runCLIGetOperation(ctx, operator, args[2:], output)
+		switch args[1] {
+		case "get":
+			return runCLIGetOperation(ctx, operator, args[2:], output)
+		case "list":
+			return runCLIListOperations(ctx, operator, args[2:], output)
+		default:
+			return ErrInvalidCLIRequest
+		}
 	case "audit":
 		if len(args) < 2 || args[1] != "list" {
 			return ErrInvalidCLIRequest
@@ -533,6 +540,24 @@ func runCLIGetOperation(ctx context.Context, operator *Operator, args []string, 
 		return err
 	}
 	return writeCLIResponse(output, &OperatorResponse{Operation: operation})
+}
+
+func runCLIListOperations(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("operation list")
+	scopeID := set.String("scope", "", "operator scope")
+	resourceID := set.String("resource", "", "resource ID")
+	limit := set.Int("limit", persistence.MaxOperationListLimit, "maximum operations")
+	if err := set.Parse(args); err != nil {
+		return ErrInvalidCLIRequest
+	}
+	if err := requireNoCLIArgs(set); err != nil {
+		return err
+	}
+	operations, err := operator.ListOperations(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, *limit)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Operations: operations})
 }
 
 func runCLIListAudit(ctx context.Context, operator *Operator, args []string, output io.Writer) error {

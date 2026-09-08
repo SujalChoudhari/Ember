@@ -133,6 +133,64 @@ func TestOperatorCoordinatesIdempotentMutationAndAuditInspection(t *testing.T) {
 	}
 }
 
+func TestOperatorListsBoundedOperationsWithinResourceScope(t *testing.T) {
+	operator := newTestOperator(t)
+	ctx := context.Background()
+	root, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "root"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	child, err := operator.CreateResource(ctx, OperatorPrincipal{ScopeID: root.ID}, models.ResourceSpec{Type: models.ResourceTypeBucket, Name: "child", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("CreateResource(child) error = %v", err)
+	}
+	other, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "other"})
+	if err != nil {
+		t.Fatalf("CreateResource(other) error = %v", err)
+	}
+
+	childMutation, err := operator.UpdateResourceTags(ctx, OperatorPrincipal{ScopeID: root.ID}, child.ID, map[string]string{"tier": "scoped"}, "request-scoped", "correlation-scoped")
+	if err != nil {
+		t.Fatalf("UpdateResourceTags(child) error = %v", err)
+	}
+	failedRecovery, recoveryErr := operator.RecoverBlob(ctx, OperatorPrincipal{ScopeID: root.ID}, child.ID, "missing", "not-the-trusted-content", []byte("not-the-trusted-content"), "request-recovery-failure", "correlation-recovery-failure")
+	if !errors.Is(recoveryErr, ErrResourceOperationFailed) || failedRecovery == nil || failedRecovery.Operation == nil || failedRecovery.Operation.Status != models.OperationStatusFailed {
+		t.Fatalf("RecoverBlob(failure) = (%#v, %v), want failed correlated operation", failedRecovery, recoveryErr)
+	}
+	otherMutation, err := operator.UpdateResourceTags(ctx, OperatorPrincipal{}, other.ID, map[string]string{"tier": "foreign"}, "request-foreign", "correlation-foreign")
+	if err != nil {
+		t.Fatalf("UpdateResourceTags(other) error = %v", err)
+	}
+
+	listed, err := operator.ListOperations(ctx, OperatorPrincipal{ScopeID: root.ID}, "", persistence.MaxOperationListLimit)
+	if err != nil {
+		t.Fatalf("ListOperations(scoped) error = %v", err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("ListOperations(scoped) = %#v, want two scoped lifecycle operations", listed)
+	}
+	statuses := map[string]models.OperationStatus{}
+	for _, operation := range listed {
+		statuses[operation.ID] = operation.Status
+	}
+	if statuses[childMutation.Operation.ID] != models.OperationStatusSucceeded || statuses[failedRecovery.Operation.ID] != models.OperationStatusFailed {
+		t.Fatalf("ListOperations(scoped) statuses = %#v, want success and failed recovery", statuses)
+	}
+	if _, err := operator.ListOperations(ctx, OperatorPrincipal{ScopeID: root.ID}, other.ID, persistence.MaxOperationListLimit); !errors.Is(err, ErrOperatorScopeDenied) {
+		t.Fatalf("ListOperations(cross-scope) error = %v, want scope denial", err)
+	}
+	byResource, err := operator.ListOperations(ctx, OperatorPrincipal{}, other.ID, 1)
+	if err != nil {
+		t.Fatalf("ListOperations(resource) error = %v", err)
+	}
+	if len(byResource) != 1 || byResource[0].ID != otherMutation.Operation.ID || byResource[0].Status != models.OperationStatusSucceeded {
+		t.Fatalf("ListOperations(resource) = %#v, want bounded successful operation", byResource)
+	}
+	if _, err := operator.ListOperations(ctx, OperatorPrincipal{}, "", 0); !errors.Is(err, persistence.ErrInvalidOperationListLimit) {
+		t.Fatalf("ListOperations(zero limit) error = %v, want invalid limit", err)
+	}
+}
+
 func TestOperatorScopesBlobLifecycleAndRangeReads(t *testing.T) {
 	operator := newTestOperator(t)
 	ctx := context.Background()

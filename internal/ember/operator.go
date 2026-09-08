@@ -49,6 +49,7 @@ type OperatorResponse struct {
 	Objects         []models.BlobObject          `json:"objects,omitempty"`
 	Content         []byte                       `json:"content,omitempty"`
 	Operation       *models.Operation            `json:"operation,omitempty"`
+	Operations      []models.Operation           `json:"operations,omitempty"`
 	Audit           []models.AuditEntry          `json:"audit,omitempty"`
 	ApplyProgress   *models.ApplyProgressRecord  `json:"applyProgress,omitempty"`
 	ApplyProgresses []models.ApplyProgressRecord `json:"applyProgresses,omitempty"`
@@ -297,6 +298,48 @@ func (operator *Operator) GetOperation(ctx context.Context, principal OperatorPr
 		return nil, err
 	}
 	return operation, nil
+}
+
+func (operator *Operator) ListOperations(ctx context.Context, principal OperatorPrincipal, resourceID string, limit int) ([]models.Operation, error) {
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > persistence.MaxOperationListLimit {
+		return nil, persistence.ErrInvalidOperationListLimit
+	}
+	if resourceID != "" {
+		if _, _, err := operator.authorizeResource(ctx, principal, resourceID); err != nil {
+			return nil, err
+		}
+		return operator.operations.ListOperations(ctx, resourceID, limit)
+	}
+
+	queryLimit := limit
+	if principal.ScopeID != "" {
+		queryLimit = persistence.MaxOperationListLimit
+	}
+	operations, err := operator.operations.ListOperations(ctx, "", queryLimit)
+	if err != nil {
+		return nil, err
+	}
+	if principal.ScopeID == "" {
+		return operations, nil
+	}
+
+	scoped := make([]models.Operation, 0, limit)
+	for _, operation := range operations {
+		if _, _, err := operator.authorizeResource(ctx, principal, operation.ResourceID); err != nil {
+			if errors.Is(err, ErrOperatorScopeDenied) || errors.Is(err, persistence.ErrResourceNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		scoped = append(scoped, operation)
+		if len(scoped) == limit {
+			break
+		}
+	}
+	return scoped, nil
 }
 
 func (operator *Operator) ListAuditHistory(ctx context.Context, principal OperatorPrincipal, resourceID string, limit int) ([]models.AuditEntry, error) {
