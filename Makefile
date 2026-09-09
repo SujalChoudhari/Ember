@@ -1,7 +1,7 @@
 .PHONY: build test package install smoke
 
 build:
-	go build -trimpath -o bin/ember ./cmd/ember
+	go build -buildvcs=false -trimpath -o bin/ember ./cmd/ember
 
 test:
 	go test ./...

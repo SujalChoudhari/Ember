@@ -9,6 +9,6 @@ BINARY="$OUT_DIR/ember-${GOOS_VALUE}-${GOARCH_VALUE}"
 
 mkdir -p "$OUT_DIR"
 GOOS="$GOOS_VALUE" GOARCH="$GOARCH_VALUE" CGO_ENABLED=0 \
-  go build -trimpath -o "$BINARY" ./cmd/ember
+  go build -buildvcs=false -trimpath -o "$BINARY" ./cmd/ember
 sha256sum "$BINARY" > "$BINARY.sha256"
 printf '%s\n' "$BINARY"
