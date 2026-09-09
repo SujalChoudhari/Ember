@@ -171,6 +171,31 @@ func (store *memoryResourceStore) UpdateTags(ctx context.Context, scopeID, resou
 	return &updated, nil
 }
 
+func (store *memoryResourceStore) UpdateObservedState(ctx context.Context, scopeID, resourceID string, state models.ResourceState) (*models.Resource, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateMemoryScope(scopeID); err != nil {
+		return nil, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	resource, ok := store.resources[resourceID]
+	if !ok || resource.Spec.ParentID != scopeID {
+		return nil, ErrResourceNotFound
+	}
+	updated := resource
+	updated.ObservedState = state
+	if err := updated.Validate(); err != nil {
+		return nil, err
+	}
+	store.resources[resourceID] = updated
+	updated.Spec.Tags = cloneTags(updated.Spec.Tags)
+	return &updated, nil
+}
+
 func (store *memoryResourceStore) Delete(ctx context.Context, scopeID, resourceID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
