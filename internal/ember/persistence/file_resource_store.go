@@ -361,6 +361,35 @@ func (store *FileResourceStore) UpdateTags(ctx context.Context, scopeID, resourc
 	return &copy, nil
 }
 
+func (store *FileResourceStore) UpdateObservedState(ctx context.Context, scopeID, resourceID string, state models.ResourceState) (*models.Resource, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateFileResourceScope(scopeID); err != nil {
+		return nil, err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	resource, exists := store.resources[resourceID]
+	if !exists || resource.Spec.ParentID != scopeID {
+		return nil, ErrResourceNotFound
+	}
+	updated := resource
+	updated.ObservedState = state
+	if err := updated.Validate(); err != nil {
+		return nil, err
+	}
+	store.resources[resourceID] = updated
+	if err := store.saveLocked(); err != nil {
+		store.resources[resourceID] = resource
+		return nil, err
+	}
+	copy := cloneStoredResource(updated)
+	return &copy, nil
+}
+
 func (store *FileResourceStore) Delete(ctx context.Context, scopeID, resourceID string) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -39,6 +39,217 @@ func (provider *unsupportedWorkloadUpdateProvider) Restart(context.Context, mode
 	return models.WorkloadStatus{}, errProviderOperationUnsupported
 }
 
+type failingReconcileProvider struct {
+	*MemoryWorkloadProvider
+	failUpdates bool
+}
+
+func (provider *failingReconcileProvider) Get(_ context.Context, resource models.Resource) (models.WorkloadStatus, error) {
+	if provider.failUpdates {
+		return workloadResourceLimitStatus(resource), nil
+	}
+	return provider.MemoryWorkloadProvider.Get(context.Background(), resource)
+}
+
+func (provider *failingReconcileProvider) Update(ctx context.Context, resource models.Resource) (models.WorkloadStatus, error) {
+	if provider.failUpdates {
+		status := workloadResourceLimitStatus(resource)
+		provider.MemoryWorkloadProvider.mu.Lock()
+		provider.MemoryWorkloadProvider.workloads[resource.ID] = status
+		provider.MemoryWorkloadProvider.mu.Unlock()
+		return status, errProviderResourceLimit
+	}
+	return provider.MemoryWorkloadProvider.Update(ctx, resource)
+}
+
+func TestWorkloadProviderPersistsObservedStateAfterReconciliation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "resources.json")
+	resourceStore, err := persistence.NewFileResourceStore(path)
+	if err != nil {
+		t.Fatalf("NewFileResourceStore() error = %v", err)
+	}
+	resources, err := NewResourceManager(resourceStore)
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	provider := NewMemoryWorkloadProvider()
+	metadata := workloadProviderMetadata("reconcile-v1")
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	created, err := manager.CreateWorkload(ctx, root.ID, workloadResourceSpec(root.ID, "api", metadata))
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+	stored, err := resourceStore.Get(ctx, root.ID, created.Resource.ID)
+	if err != nil {
+		t.Fatalf("resource store Get() error = %v", err)
+	}
+	if stored.ObservedState != models.ResourceStateReady {
+		t.Fatalf("persisted observed state = %q, want %q", stored.ObservedState, models.ResourceStateReady)
+	}
+	reopened, err := persistence.NewFileResourceStore(path)
+	if err != nil {
+		t.Fatalf("NewFileResourceStore(reopen) error = %v", err)
+	}
+	reopenedResource, err := reopened.Get(ctx, root.ID, created.Resource.ID)
+	if err != nil {
+		t.Fatalf("reopened resource Get() error = %v", err)
+	}
+	if reopenedResource.ObservedState != models.ResourceStateReady {
+		t.Fatalf("reopened observed state = %q, want %q", reopenedResource.ObservedState, models.ResourceStateReady)
+	}
+}
+
+func TestWorkloadProviderPersistsStableFailureFromReconciliation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "resources.json")
+	resourceStore, err := persistence.NewFileResourceStore(path)
+	if err != nil {
+		t.Fatalf("NewFileResourceStore() error = %v", err)
+	}
+	resources, err := NewResourceManager(resourceStore)
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	provider := &failingReconcileProvider{MemoryWorkloadProvider: NewMemoryWorkloadProvider()}
+	metadata := workloadProviderMetadata("reconcile-failure-v1")
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	created, err := manager.CreateWorkload(ctx, root.ID, workloadResourceSpec(root.ID, "api", metadata))
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+	provider.failUpdates = true
+	reconciled, err := manager.ReconcileWorkload(ctx, root.ID, created.Resource.ID)
+	if !errors.Is(err, ErrWorkloadResourceLimit) {
+		t.Fatalf("ReconcileWorkload(failure) error = %v, want ErrWorkloadResourceLimit", err)
+	}
+	if reconciled == nil || reconciled.Status.ObservedState != models.ResourceStateFailed {
+		t.Fatalf("ReconcileWorkload(failure) = %#v, want stable failed status", reconciled)
+	}
+	stored, err := resourceStore.Get(ctx, root.ID, created.Resource.ID)
+	if err != nil {
+		t.Fatalf("resource store Get() error = %v", err)
+	}
+	if stored.ObservedState != models.ResourceStateFailed {
+		t.Fatalf("persisted failure state = %q, want %q", stored.ObservedState, models.ResourceStateFailed)
+	}
+}
+
+func TestWorkloadProviderReconcilesMissingProviderWithoutDuplicateResource(t *testing.T) {
+	ctx := context.Background()
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	provider := NewMemoryWorkloadProvider()
+	metadata := workloadProviderMetadata("reconcile-v2")
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	created, err := manager.CreateWorkload(ctx, root.ID, workloadResourceSpec(root.ID, "api", metadata))
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+	if err := provider.Delete(ctx, created.Resource); err != nil {
+		t.Fatalf("provider Delete() error = %v", err)
+	}
+
+	reconciled, err := manager.ReconcileWorkload(ctx, root.ID, created.Resource.ID)
+	if err != nil {
+		t.Fatalf("ReconcileWorkload(recreate) error = %v", err)
+	}
+	if reconciled == nil || reconciled.Resource.ID != created.Resource.ID || reconciled.Status.ObservedState != models.ResourceStateReady {
+		t.Fatalf("ReconcileWorkload(recreate) = %#v, want original ready workload", reconciled)
+	}
+	if _, err := manager.ReconcileWorkload(ctx, root.ID, created.Resource.ID); err != nil {
+		t.Fatalf("ReconcileWorkload(repeat) error = %v", err)
+	}
+	workloads, err := resources.ListResources(ctx, root.ID, persistence.MaxResourceListLimit)
+	if err != nil {
+		t.Fatalf("ListResources() error = %v", err)
+	}
+	if len(workloads) != 1 || workloads[0].ID != created.Resource.ID {
+		t.Fatalf("reconciled resources = %#v, want one original resource", workloads)
+	}
+}
+
+func TestWorkloadProviderReconciliationDeletesDesiredDeletingWorkload(t *testing.T) {
+	ctx := context.Background()
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	provider := NewMemoryWorkloadProvider()
+	metadata := workloadProviderMetadata("reconcile-v3")
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	spec := workloadResourceSpec(root.ID, "api", metadata)
+	spec.DesiredState = models.ResourceStateDeleting
+	created, err := manager.CreateWorkload(ctx, root.ID, spec)
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+	if _, err := manager.ReconcileWorkload(ctx, root.ID, created.Resource.ID); err != nil {
+		t.Fatalf("ReconcileWorkload(delete) error = %v", err)
+	}
+	if _, err := resources.GetResource(ctx, root.ID, created.Resource.ID); !errors.Is(err, persistence.ErrResourceNotFound) {
+		t.Fatalf("GetResource(deleted workload) error = %v, want ErrResourceNotFound", err)
+	}
+}
+
 func TestWorkloadProviderBoundaryScopesLifecycleAndStatus(t *testing.T) {
 	ctx := context.Background()
 	resourceStore, err := persistence.NewFileResourceStore(filepath.Join(t.TempDir(), "resources.json"))

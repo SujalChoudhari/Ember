@@ -17,6 +17,7 @@ type ResourceControlPlane interface {
 	GetResource(ctx context.Context, scopeID, resourceID string) (*models.Resource, error)
 	ListResources(ctx context.Context, scopeID string, limit int) ([]models.Resource, error)
 	UpdateResourceTags(ctx context.Context, scopeID, resourceID string, tags map[string]string) (*models.Resource, error)
+	UpdateResourceObservedState(ctx context.Context, scopeID, resourceID string, state models.ResourceState) (*models.Resource, error)
 	DeleteResource(ctx context.Context, scopeID, resourceID string) error
 	AcquireResourceLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error
 	ReleaseResourceLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error
@@ -50,6 +51,10 @@ func (manager *ResourceManager) ListResources(ctx context.Context, scopeID strin
 
 func (manager *ResourceManager) UpdateResourceTags(ctx context.Context, scopeID, resourceID string, tags map[string]string) (*models.Resource, error) {
 	return manager.store.UpdateTags(ctx, scopeID, resourceID, tags)
+}
+
+func (manager *ResourceManager) UpdateResourceObservedState(ctx context.Context, scopeID, resourceID string, state models.ResourceState) (*models.Resource, error) {
+	return manager.store.UpdateObservedState(ctx, scopeID, resourceID, state)
 }
 
 func (manager *ResourceManager) DeleteResource(ctx context.Context, scopeID, resourceID string) error {

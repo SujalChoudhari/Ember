@@ -147,6 +147,7 @@ type WorkloadControlPlane interface {
 	CreateWorkload(context.Context, string, models.ResourceSpec) (*WorkloadView, error)
 	GetWorkload(context.Context, string, string) (*WorkloadView, error)
 	UpdateWorkload(context.Context, string, string) (*WorkloadView, error)
+	ReconcileWorkload(context.Context, string, string) (*WorkloadView, error)
 	RestartWorkload(context.Context, string, string) (*WorkloadView, error)
 	GetWorkloadLogs(context.Context, string, string, int) ([]models.WorkloadLog, error)
 	AttachWorkloadVolume(context.Context, string, string, string, int64) (*models.WorkloadVolume, error)
@@ -198,11 +199,18 @@ func (manager *WorkloadManager) CreateWorkload(ctx context.Context, scopeID stri
 		if errors.Is(providerErr, errProviderResourceLimit) {
 			view, statusErr := newWorkloadView(*resource, status)
 			if statusErr != nil {
+				_ = provider.Delete(ctx, *resource)
 				_ = manager.resources.DeleteResource(ctx, scopeID, resource.ID)
 				return nil, statusErr
 			}
+			if _, stateErr := manager.resources.UpdateResourceObservedState(ctx, scopeID, resource.ID, status.ObservedState); stateErr != nil {
+				_ = provider.Delete(ctx, *resource)
+				_ = manager.resources.DeleteResource(ctx, scopeID, resource.ID)
+				return nil, stateErr
+			}
 			return view, ErrWorkloadResourceLimit
 		}
+		_ = provider.Delete(ctx, *resource)
 		_ = manager.resources.DeleteResource(ctx, scopeID, resource.ID)
 		return nil, mapWorkloadProviderError(providerErr)
 	}
@@ -210,6 +218,11 @@ func (manager *WorkloadManager) CreateWorkload(ctx context.Context, scopeID stri
 	if statusErr != nil {
 		_ = manager.resources.DeleteResource(ctx, scopeID, resource.ID)
 		return nil, statusErr
+	}
+	if _, err := manager.resources.UpdateResourceObservedState(ctx, scopeID, resource.ID, view.Status.ObservedState); err != nil {
+		_ = provider.Delete(ctx, *resource)
+		_ = manager.resources.DeleteResource(ctx, scopeID, resource.ID)
+		return nil, err
 	}
 	return view, nil
 }
@@ -236,7 +249,14 @@ func (manager *WorkloadManager) GetWorkload(ctx context.Context, scopeID, resour
 	if providerErr != nil {
 		return nil, mapWorkloadProviderError(providerErr)
 	}
-	return newWorkloadView(*resource, status)
+	view, statusErr := newWorkloadView(*resource, status)
+	if statusErr != nil {
+		return nil, statusErr
+	}
+	if _, err := manager.resources.UpdateResourceObservedState(ctx, scopeID, resourceID, status.ObservedState); err != nil {
+		return nil, err
+	}
+	return view, nil
 }
 
 func validateWorkloadLookup(ctx context.Context, scopeID, resourceID string) error {
@@ -267,9 +287,79 @@ func (manager *WorkloadManager) UpdateWorkload(ctx context.Context, scopeID, res
 	}
 	status, providerErr := provider.Update(ctx, *resource)
 	if providerErr != nil {
+		if errors.Is(providerErr, errProviderResourceLimit) {
+			view, statusErr := newWorkloadView(*resource, status)
+			if statusErr != nil {
+				return nil, statusErr
+			}
+			if _, stateErr := manager.resources.UpdateResourceObservedState(ctx, scopeID, resourceID, status.ObservedState); stateErr != nil {
+				return nil, stateErr
+			}
+			return view, ErrWorkloadResourceLimit
+		}
 		return nil, mapWorkloadProviderError(providerErr)
 	}
-	return newWorkloadView(*resource, status)
+	view, statusErr := newWorkloadView(*resource, status)
+	if statusErr != nil {
+		return nil, statusErr
+	}
+	if _, err := manager.resources.UpdateResourceObservedState(ctx, scopeID, resourceID, status.ObservedState); err != nil {
+		return nil, err
+	}
+	return view, nil
+}
+
+func (manager *WorkloadManager) ReconcileWorkload(ctx context.Context, scopeID, resourceID string) (*WorkloadView, error) {
+	if err := validateWorkloadLookup(ctx, scopeID, resourceID); err != nil {
+		return nil, err
+	}
+	resource, err := manager.resources.GetResource(ctx, scopeID, resourceID)
+	if errors.Is(err, persistence.ErrResourceNotFound) {
+		return nil, ErrWorkloadNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resource.Spec.Type != models.ResourceTypeWorkload {
+		return nil, ErrWorkloadNotFound
+	}
+	provider, err := manager.registry.Resolve(resource.Spec.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if resource.Spec.DesiredState == models.ResourceStateDeleting {
+		if providerErr := provider.Delete(ctx, *resource); providerErr != nil && !errors.Is(providerErr, errProviderNotFound) {
+			return nil, mapWorkloadProviderError(providerErr)
+		}
+		if err := manager.resources.DeleteResource(ctx, scopeID, resourceID); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	status, providerErr := provider.Get(ctx, *resource)
+	if errors.Is(providerErr, errProviderNotFound) {
+		status, providerErr = provider.Create(ctx, *resource)
+	}
+	if providerErr != nil {
+		if statusErr := status.Validate(); statusErr == nil {
+			_, _ = manager.resources.UpdateResourceObservedState(ctx, scopeID, resourceID, status.ObservedState)
+		}
+		return nil, mapWorkloadProviderError(providerErr)
+	}
+	if status.ObservedState != resource.Spec.DesiredState {
+		status, providerErr = provider.Update(ctx, *resource)
+	}
+	view, statusErr := newWorkloadView(*resource, status)
+	if statusErr != nil {
+		return nil, statusErr
+	}
+	if _, err := manager.resources.UpdateResourceObservedState(ctx, scopeID, resourceID, status.ObservedState); err != nil {
+		return nil, err
+	}
+	if providerErr != nil {
+		return view, mapWorkloadProviderError(providerErr)
+	}
+	return view, nil
 }
 
 func (manager *WorkloadManager) DeleteWorkload(ctx context.Context, scopeID, resourceID string) error {
@@ -326,7 +416,14 @@ func (manager *WorkloadManager) RestartWorkload(ctx context.Context, scopeID, re
 	if providerErr != nil {
 		return nil, mapWorkloadProviderError(providerErr)
 	}
-	return newWorkloadView(*resource, status)
+	view, statusErr := newWorkloadView(*resource, status)
+	if statusErr != nil {
+		return nil, statusErr
+	}
+	if _, err := manager.resources.UpdateResourceObservedState(ctx, scopeID, resourceID, status.ObservedState); err != nil {
+		return nil, err
+	}
+	return view, nil
 }
 
 func (manager *WorkloadManager) GetWorkloadLogs(ctx context.Context, scopeID, resourceID string, limit int) ([]models.WorkloadLog, error) {

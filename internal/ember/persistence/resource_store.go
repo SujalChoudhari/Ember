@@ -26,6 +26,7 @@ type ResourceStore interface {
 	Get(ctx context.Context, scopeID, resourceID string) (*models.Resource, error)
 	List(ctx context.Context, scopeID string, limit int) ([]models.Resource, error)
 	UpdateTags(ctx context.Context, scopeID, resourceID string, tags map[string]string) (*models.Resource, error)
+	UpdateObservedState(ctx context.Context, scopeID, resourceID string, state models.ResourceState) (*models.Resource, error)
 	Delete(ctx context.Context, scopeID, resourceID string) error
 	AcquireLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error
 	ReleaseLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error
