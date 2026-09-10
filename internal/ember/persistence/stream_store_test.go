@@ -93,6 +93,91 @@ func TestFileStreamStorePersistsPartitionedRecordsAndAppliesRetention(t *testing
 	}
 }
 
+func TestFileStreamStoreConsumerGroupProgressReplayAndRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "streams.json")
+	store, err := NewFileStreamStore(path, StreamOptions{MaxStreams: 1, MaxPartitions: 1, MaxRecordsPerPartition: 4, MaxBytes: 64})
+	if err != nil {
+		t.Fatalf("NewFileStreamStore() error = %v", err)
+	}
+	stream, err := store.Create(ctx, models.StreamSpec{Name: "orders", PartitionCount: 1})
+	if err != nil {
+		t.Fatalf("Create(stream) error = %v", err)
+	}
+	for _, payload := range []string{"one", "two", "three"} {
+		if _, err := store.Append(ctx, stream.ID, 0, []byte(payload)); err != nil {
+			t.Fatalf("Append(%q) error = %v", payload, err)
+		}
+	}
+
+	group, err := store.CreateConsumerGroup(ctx, models.ConsumerGroupSpec{StreamID: stream.ID, Name: "workers", MemberID: "worker-a"})
+	if err != nil {
+		t.Fatalf("CreateConsumerGroup() error = %v", err)
+	}
+	if group.ID != "consumer-group-00000001" || group.MemberID != "worker-a" {
+		t.Fatalf("CreateConsumerGroup() = %#v, want deterministic membership", group)
+	}
+	initial, err := store.ReadConsumerGroup(ctx, group.ID, 0, 2)
+	if err != nil {
+		t.Fatalf("ReadConsumerGroup(initial) error = %v", err)
+	}
+	if len(initial) != 2 || string(initial[0].Payload) != "one" || string(initial[1].Payload) != "two" {
+		t.Fatalf("ReadConsumerGroup(initial) = %#v, want first two records", initial)
+	}
+	if err := store.CommitConsumerGroupOffset(ctx, group.ID, 0, 2); err != nil {
+		t.Fatalf("CommitConsumerGroupOffset() error = %v", err)
+	}
+	resumed, err := store.ReadConsumerGroup(ctx, group.ID, 0, 2)
+	if err != nil {
+		t.Fatalf("ReadConsumerGroup(resumed) error = %v", err)
+	}
+	if len(resumed) != 1 || string(resumed[0].Payload) != "three" {
+		t.Fatalf("ReadConsumerGroup(resumed) = %#v, want remaining record", resumed)
+	}
+	replayed, err := store.ReplayConsumerGroup(ctx, group.ID, 0, 0, 2)
+	if err != nil {
+		t.Fatalf("ReplayConsumerGroup() error = %v", err)
+	}
+	if len(replayed) != 2 || string(replayed[0].Payload) != "one" || string(replayed[1].Payload) != "two" {
+		t.Fatalf("ReplayConsumerGroup() = %#v, want first two records", replayed)
+	}
+	if err := store.RecordConsumerGroupFailure(ctx, group.ID, 0, "handler failed"); err != nil {
+		t.Fatalf("RecordConsumerGroupFailure() error = %v", err)
+	}
+	progress, err := store.InspectConsumerGroup(ctx, group.ID)
+	if err != nil {
+		t.Fatalf("InspectConsumerGroup() error = %v", err)
+	}
+	if len(progress) != 1 || progress[0].CommittedOffset != 2 || progress[0].NextOffset != 3 || progress[0].Lag != 1 || progress[0].LastError != "handler failed" {
+		t.Fatalf("InspectConsumerGroup() = %#v, want lag and failure state", progress)
+	}
+
+	if err := store.CommitConsumerGroupOffset(ctx, group.ID, 0, 4); !errors.Is(err, ErrInvalidConsumerGroupOffset) {
+		t.Fatalf("CommitConsumerGroupOffset(overrun) error = %v, want ErrInvalidConsumerGroupOffset", err)
+	}
+	if err := store.CommitConsumerGroupOffset(ctx, group.ID, 0, 1); !errors.Is(err, ErrConsumerGroupOffsetRewind) {
+		t.Fatalf("CommitConsumerGroupOffset(rewind) error = %v, want ErrConsumerGroupOffsetRewind", err)
+	}
+	if _, err := store.ReadConsumerGroup(ctx, group.ID, 1, 1); !errors.Is(err, ErrInvalidConsumerGroupPartition) {
+		t.Fatalf("ReadConsumerGroup(invalid partition) error = %v, want ErrInvalidConsumerGroupPartition", err)
+	}
+	if err := store.RecordConsumerGroupFailure(ctx, group.ID, 0, " "); !errors.Is(err, ErrInvalidConsumerGroupFailure) {
+		t.Fatalf("RecordConsumerGroupFailure(blank) error = %v, want ErrInvalidConsumerGroupFailure", err)
+	}
+
+	reopened, err := NewFileStreamStore(path, StreamOptions{MaxStreams: 1, MaxPartitions: 1, MaxRecordsPerPartition: 4, MaxBytes: 64})
+	if err != nil {
+		t.Fatalf("NewFileStreamStore(reopen) error = %v", err)
+	}
+	resumed, err = reopened.ReadConsumerGroup(ctx, group.ID, 0, 2)
+	if err != nil {
+		t.Fatalf("ReadConsumerGroup(reopen) error = %v", err)
+	}
+	if len(resumed) != 1 || string(resumed[0].Payload) != "three" {
+		t.Fatalf("ReadConsumerGroup(reopen) = %#v, want committed resume", resumed)
+	}
+}
+
 func TestFileStreamStoreEnforcesBoundedInputsAndIsolation(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "streams.json")

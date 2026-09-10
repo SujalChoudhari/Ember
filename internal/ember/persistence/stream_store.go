@@ -65,20 +65,27 @@ func (options StreamOptions) normalized() (StreamOptions, error) {
 }
 
 var (
-	ErrInvalidStreamStorePath = errors.New("invalid stream store path")
-	ErrInvalidStreamOptions   = errors.New("invalid stream options")
-	ErrStreamNotFound         = errors.New("stream not found")
-	ErrDuplicateStream        = errors.New("duplicate stream")
-	ErrStreamCountExceeded    = errors.New("stream count limit exceeded")
-	ErrStreamIDExhausted      = errors.New("stream IDs exhausted")
-	ErrInvalidStreamPartition = errors.New("invalid stream partition")
-	ErrStreamPartitionFull    = errors.New("stream partition record limit exceeded")
-	ErrStreamBytesExceeded    = errors.New("stream byte limit exceeded")
-	ErrInvalidStreamOffset    = errors.New("invalid stream offset")
-	ErrInvalidStreamReadLimit = errors.New("invalid stream read limit")
-	ErrStreamStoreCorrupt     = errors.New("corrupt stream store")
-	ErrStreamStoreTooLarge    = errors.New("stream store exceeds size limit")
-	ErrStreamStoreIO          = errors.New("stream store I/O failure")
+	ErrInvalidStreamStorePath        = errors.New("invalid stream store path")
+	ErrInvalidStreamOptions          = errors.New("invalid stream options")
+	ErrStreamNotFound                = errors.New("stream not found")
+	ErrDuplicateStream               = errors.New("duplicate stream")
+	ErrStreamCountExceeded           = errors.New("stream count limit exceeded")
+	ErrStreamIDExhausted             = errors.New("stream IDs exhausted")
+	ErrInvalidStreamPartition        = errors.New("invalid stream partition")
+	ErrStreamPartitionFull           = errors.New("stream partition record limit exceeded")
+	ErrStreamBytesExceeded           = errors.New("stream byte limit exceeded")
+	ErrInvalidStreamOffset           = errors.New("invalid stream offset")
+	ErrInvalidStreamReadLimit        = errors.New("invalid stream read limit")
+	ErrStreamStoreCorrupt            = errors.New("corrupt stream store")
+	ErrStreamStoreTooLarge           = errors.New("stream store exceeds size limit")
+	ErrStreamStoreIO                 = errors.New("stream store I/O failure")
+	ErrConsumerGroupNotFound         = errors.New("consumer group not found")
+	ErrDuplicateConsumerGroup        = errors.New("duplicate consumer group")
+	ErrConsumerGroupIDExhausted      = errors.New("consumer group IDs exhausted")
+	ErrInvalidConsumerGroupPartition = errors.New("invalid consumer group partition")
+	ErrInvalidConsumerGroupOffset    = errors.New("invalid consumer group offset")
+	ErrConsumerGroupOffsetRewind     = errors.New("consumer group offset rewind")
+	ErrInvalidConsumerGroupFailure   = errors.New("invalid consumer group failure")
 )
 
 type streamDiskPartition struct {
@@ -88,11 +95,14 @@ type streamDiskPartition struct {
 }
 
 type streamStoreDiskState struct {
-	Version    int                   `json:"version"`
-	NextID     uint64                `json:"next_id"`
-	Streams    []models.Stream       `json:"streams"`
-	Partitions []streamDiskPartition `json:"partitions"`
-	Records    []models.StreamRecord `json:"records"`
+	Version               int                             `json:"version"`
+	NextID                uint64                          `json:"next_id"`
+	NextGroupID           uint64                          `json:"next_group_id"`
+	Streams               []models.Stream                 `json:"streams"`
+	Partitions            []streamDiskPartition           `json:"partitions"`
+	Records               []models.StreamRecord           `json:"records"`
+	ConsumerGroups        []models.ConsumerGroup          `json:"consumer_groups,omitempty"`
+	ConsumerGroupProgress []models.ConsumerGroupPartition `json:"consumer_group_progress,omitempty"`
 }
 
 type streamPartitionState struct {
@@ -100,14 +110,17 @@ type streamPartitionState struct {
 }
 
 type FileStreamStore struct {
-	mu         sync.Mutex
-	path       string
-	options    StreamOptions
-	now        func() time.Time
-	nextID     uint64
-	streams    map[string]models.Stream
-	partitions map[string]streamPartitionState
-	records    map[string][]models.StreamRecord
+	mu                    sync.Mutex
+	path                  string
+	options               StreamOptions
+	now                   func() time.Time
+	nextID                uint64
+	nextGroupID           uint64
+	streams               map[string]models.Stream
+	partitions            map[string]streamPartitionState
+	records               map[string][]models.StreamRecord
+	consumerGroups        map[string]models.ConsumerGroup
+	consumerGroupProgress map[string]map[int]models.ConsumerGroupPartition
 }
 
 func NewFileStreamStore(path string, options StreamOptions) (*FileStreamStore, error) {
@@ -127,12 +140,14 @@ func NewFileStreamStore(path string, options StreamOptions) (*FileStreamStore, e
 		return nil, ErrStreamStoreIO
 	}
 	store := &FileStreamStore{
-		path:       path,
-		options:    normalized,
-		now:        time.Now,
-		streams:    make(map[string]models.Stream),
-		partitions: make(map[string]streamPartitionState),
-		records:    make(map[string][]models.StreamRecord),
+		path:                  path,
+		options:               normalized,
+		now:                   time.Now,
+		streams:               make(map[string]models.Stream),
+		partitions:            make(map[string]streamPartitionState),
+		records:               make(map[string][]models.StreamRecord),
+		consumerGroups:        make(map[string]models.ConsumerGroup),
+		consumerGroupProgress: make(map[string]map[int]models.ConsumerGroupPartition),
 	}
 	if err := store.load(); err != nil {
 		return nil, err
@@ -247,15 +262,74 @@ func (store *FileStreamStore) load() error {
 		}
 		records[key] = partitionRecords
 	}
+
+	consumerGroups := make(map[string]models.ConsumerGroup, len(state.ConsumerGroups))
+	for _, group := range state.ConsumerGroups {
+		stream, exists := streams[group.StreamID]
+		if !exists || group.Validate() != nil || stream.PartitionCount > store.options.MaxPartitions {
+			return ErrStreamStoreCorrupt
+		}
+		if _, exists := consumerGroups[group.ID]; exists {
+			return ErrStreamStoreCorrupt
+		}
+		for _, existing := range consumerGroups {
+			if existing.StreamID == group.StreamID && existing.Name == group.Name {
+				return ErrStreamStoreCorrupt
+			}
+		}
+		consumerGroups[group.ID] = group
+	}
+	consumerGroupProgress := make(map[string]map[int]models.ConsumerGroupPartition, len(consumerGroups))
+	for _, progress := range state.ConsumerGroupProgress {
+		group, exists := consumerGroups[progress.GroupID]
+		if !exists || progress.StreamID != group.StreamID || progress.Partition < 0 || progress.Partition >= streams[group.StreamID].PartitionCount ||
+			progress.CommittedOffset < 0 || !validConsumerGroupFailure(progress.LastError) || progress.UpdatedAt.IsZero() {
+			return ErrStreamStoreCorrupt
+		}
+		key := streamPartitionKey(progress.StreamID, progress.Partition)
+		partition, exists := partitions[key]
+		if !exists || progress.CommittedOffset > partition.nextOffset {
+			return ErrStreamStoreCorrupt
+		}
+		normalized := progress
+		normalized.NextOffset = partition.nextOffset
+		normalized.Lag = partition.nextOffset - progress.CommittedOffset
+		if normalized.Validate() != nil {
+			return ErrStreamStoreCorrupt
+		}
+		if consumerGroupProgress[progress.GroupID] == nil {
+			consumerGroupProgress[progress.GroupID] = make(map[int]models.ConsumerGroupPartition)
+		}
+		if _, exists := consumerGroupProgress[progress.GroupID][progress.Partition]; exists {
+			return ErrStreamStoreCorrupt
+		}
+		consumerGroupProgress[progress.GroupID][progress.Partition] = normalized
+	}
+	for groupID, group := range consumerGroups {
+		progressByPartition := consumerGroupProgress[groupID]
+		for partition := 0; partition < streams[group.StreamID].PartitionCount; partition++ {
+			if _, exists := progressByPartition[partition]; !exists {
+				return ErrStreamStoreCorrupt
+			}
+		}
+	}
+
 	store.nextID = state.NextID
+	store.nextGroupID = state.NextGroupID
 	store.streams = streams
 	store.partitions = partitions
 	store.records = records
+	store.consumerGroups = consumerGroups
+	store.consumerGroupProgress = consumerGroupProgress
 	return nil
 }
 
 func formatOffset(offset int64) string {
 	return strconv.FormatInt(offset, 10)
+}
+
+func validConsumerGroupFailure(value string) bool {
+	return value == "" || (strings.TrimSpace(value) != "" && len(value) <= models.MaxWorkloadReasonLength)
 }
 
 func (store *FileStreamStore) diskStateLocked() streamStoreDiskState {
@@ -290,7 +364,38 @@ func (store *FileStreamStore) diskStateLocked() streamStoreDiskState {
 		}
 		return records[i].StreamID < records[j].StreamID
 	})
-	return streamStoreDiskState{Version: streamStoreVersion, NextID: store.nextID, Streams: streams, Partitions: partitions, Records: records}
+
+	consumerGroups := make([]models.ConsumerGroup, 0, len(store.consumerGroups))
+	for _, group := range store.consumerGroups {
+		consumerGroups = append(consumerGroups, group)
+	}
+	sort.Slice(consumerGroups, func(i, j int) bool { return consumerGroups[i].ID < consumerGroups[j].ID })
+
+	consumerGroupProgress := make([]models.ConsumerGroupPartition, 0)
+	for groupID, group := range store.consumerGroups {
+		for partition, progress := range store.consumerGroupProgress[groupID] {
+			progress.NextOffset = store.partitions[streamPartitionKey(group.StreamID, partition)].nextOffset
+			progress.Lag = progress.NextOffset - progress.CommittedOffset
+			consumerGroupProgress = append(consumerGroupProgress, progress)
+		}
+	}
+	sort.Slice(consumerGroupProgress, func(i, j int) bool {
+		if consumerGroupProgress[i].GroupID == consumerGroupProgress[j].GroupID {
+			return consumerGroupProgress[i].Partition < consumerGroupProgress[j].Partition
+		}
+		return consumerGroupProgress[i].GroupID < consumerGroupProgress[j].GroupID
+	})
+
+	return streamStoreDiskState{
+		Version:               streamStoreVersion,
+		NextID:                store.nextID,
+		NextGroupID:           store.nextGroupID,
+		Streams:               streams,
+		Partitions:            partitions,
+		Records:               records,
+		ConsumerGroups:        consumerGroups,
+		ConsumerGroupProgress: consumerGroupProgress,
+	}
 }
 
 func splitStreamPartitionKey(key string) (string, int) {
@@ -381,6 +486,30 @@ func (store *FileStreamStore) validateStreamPartitionLocked(streamID string, par
 		return ErrInvalidStreamPartition
 	}
 	return nil
+}
+
+func (store *FileStreamStore) readRecordsLocked(streamID string, partition int, fromOffset int64, limit int) []models.StreamRecord {
+	result := make([]models.StreamRecord, 0, limit)
+	for _, record := range store.records[streamPartitionKey(streamID, partition)] {
+		if record.Offset >= fromOffset {
+			result = append(result, cloneStreamRecord(record))
+			if len(result) == limit {
+				break
+			}
+		}
+	}
+	return result
+}
+
+func (store *FileStreamStore) validateConsumerGroupPartitionLocked(groupID string, partition int) (models.ConsumerGroup, error) {
+	group, exists := store.consumerGroups[groupID]
+	if !exists {
+		return models.ConsumerGroup{}, ErrConsumerGroupNotFound
+	}
+	if err := store.validateStreamPartitionLocked(group.StreamID, partition); err != nil {
+		return models.ConsumerGroup{}, ErrInvalidConsumerGroupPartition
+	}
+	return group, nil
 }
 
 func (store *FileStreamStore) Create(ctx context.Context, spec models.StreamSpec) (*models.Stream, error) {
@@ -573,6 +702,208 @@ func (store *FileStreamStore) InspectPartition(ctx context.Context, streamID str
 	return &models.StreamPartition{StreamID: streamID, Partition: partition, NextOffset: state.nextOffset, RecordCount: len(partitionRecords), Bytes: bytes}, nil
 }
 
+func (store *FileStreamStore) CreateConsumerGroup(ctx context.Context, spec models.ConsumerGroupSpec) (*models.ConsumerGroup, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	stream, exists := store.streams[spec.StreamID]
+	if !exists {
+		return nil, ErrStreamNotFound
+	}
+	for _, group := range store.consumerGroups {
+		if group.StreamID == spec.StreamID && group.Name == spec.Name {
+			return nil, ErrDuplicateConsumerGroup
+		}
+	}
+	if store.nextGroupID == ^uint64(0) {
+		return nil, ErrConsumerGroupIDExhausted
+	}
+	store.nextGroupID++
+	now := store.now().UTC()
+	group := models.ConsumerGroup{ID: fmt.Sprintf("consumer-group-%08d", store.nextGroupID), StreamID: spec.StreamID, Name: spec.Name, MemberID: spec.MemberID, CreatedAt: now}
+	if err := group.Validate(); err != nil {
+		store.nextGroupID--
+		return nil, err
+	}
+	progress := make(map[int]models.ConsumerGroupPartition, stream.PartitionCount)
+	for partition := 0; partition < stream.PartitionCount; partition++ {
+		nextOffset := store.partitions[streamPartitionKey(stream.ID, partition)].nextOffset
+		progress[partition] = models.ConsumerGroupPartition{GroupID: group.ID, StreamID: stream.ID, Partition: partition, NextOffset: nextOffset, Lag: nextOffset, UpdatedAt: now}
+	}
+	store.consumerGroups[group.ID] = group
+	store.consumerGroupProgress[group.ID] = progress
+	if err := store.saveLocked(); err != nil {
+		delete(store.consumerGroups, group.ID)
+		delete(store.consumerGroupProgress, group.ID)
+		store.nextGroupID--
+		return nil, err
+	}
+	copy := group
+	return &copy, nil
+}
+
+func (store *FileStreamStore) GetConsumerGroup(ctx context.Context, groupID string) (*models.ConsumerGroup, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.expireLocked(store.now().UTC()) {
+		if err := store.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
+	group, exists := store.consumerGroups[groupID]
+	if !exists {
+		return nil, ErrConsumerGroupNotFound
+	}
+	copy := group
+	return &copy, nil
+}
+
+func (store *FileStreamStore) ReadConsumerGroup(ctx context.Context, groupID string, partition, limit int) ([]models.StreamRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > MaxStreamReadLimit {
+		return nil, ErrInvalidStreamReadLimit
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	group, err := store.validateConsumerGroupPartitionLocked(groupID, partition)
+	if err != nil {
+		return nil, err
+	}
+	if store.expireLocked(store.now().UTC()) {
+		if err := store.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
+	return store.readRecordsLocked(group.StreamID, partition, store.consumerGroupProgress[groupID][partition].CommittedOffset, limit), nil
+}
+
+func (store *FileStreamStore) ReplayConsumerGroup(ctx context.Context, groupID string, partition int, fromOffset int64, limit int) ([]models.StreamRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if fromOffset < 0 {
+		return nil, ErrInvalidConsumerGroupOffset
+	}
+	if limit <= 0 || limit > MaxStreamReadLimit {
+		return nil, ErrInvalidStreamReadLimit
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	group, err := store.validateConsumerGroupPartitionLocked(groupID, partition)
+	if err != nil {
+		return nil, err
+	}
+	if store.expireLocked(store.now().UTC()) {
+		if err := store.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
+	nextOffset := store.partitions[streamPartitionKey(group.StreamID, partition)].nextOffset
+	if fromOffset > nextOffset {
+		return nil, ErrInvalidConsumerGroupOffset
+	}
+	return store.readRecordsLocked(group.StreamID, partition, fromOffset, limit), nil
+}
+
+func (store *FileStreamStore) CommitConsumerGroupOffset(ctx context.Context, groupID string, partition int, offset int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	group, err := store.validateConsumerGroupPartitionLocked(groupID, partition)
+	if err != nil {
+		return err
+	}
+	key := streamPartitionKey(group.StreamID, partition)
+	nextOffset := store.partitions[key].nextOffset
+	if offset < 0 || offset > nextOffset {
+		return ErrInvalidConsumerGroupOffset
+	}
+	current := store.consumerGroupProgress[groupID][partition]
+	if offset < current.CommittedOffset {
+		return ErrConsumerGroupOffsetRewind
+	}
+	previous := current
+	current.CommittedOffset = offset
+	current.NextOffset = nextOffset
+	current.Lag = nextOffset - offset
+	current.LastError = ""
+	current.UpdatedAt = store.now().UTC()
+	store.consumerGroupProgress[groupID][partition] = current
+	if err := store.saveLocked(); err != nil {
+		store.consumerGroupProgress[groupID][partition] = previous
+		return err
+	}
+	return nil
+}
+
+func (store *FileStreamStore) RecordConsumerGroupFailure(ctx context.Context, groupID string, partition int, reason string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !validConsumerGroupFailure(reason) || strings.TrimSpace(reason) == "" {
+		return ErrInvalidConsumerGroupFailure
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	group, err := store.validateConsumerGroupPartitionLocked(groupID, partition)
+	if err != nil {
+		return err
+	}
+	current := store.consumerGroupProgress[groupID][partition]
+	previous := current
+	current.NextOffset = store.partitions[streamPartitionKey(group.StreamID, partition)].nextOffset
+	current.Lag = current.NextOffset - current.CommittedOffset
+	current.LastError = reason
+	current.UpdatedAt = store.now().UTC()
+	store.consumerGroupProgress[groupID][partition] = current
+	if err := store.saveLocked(); err != nil {
+		store.consumerGroupProgress[groupID][partition] = previous
+		return err
+	}
+	return nil
+}
+
+func (store *FileStreamStore) InspectConsumerGroup(ctx context.Context, groupID string) ([]models.ConsumerGroupPartition, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	group, exists := store.consumerGroups[groupID]
+	if !exists {
+		return nil, ErrConsumerGroupNotFound
+	}
+	if store.expireLocked(store.now().UTC()) {
+		if err := store.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
+	progressByPartition := store.consumerGroupProgress[groupID]
+	result := make([]models.ConsumerGroupPartition, 0, len(progressByPartition))
+	for partition := 0; partition < store.streams[group.StreamID].PartitionCount; partition++ {
+		progress, exists := progressByPartition[partition]
+		if !exists {
+			return nil, ErrStreamStoreCorrupt
+		}
+		progress.NextOffset = store.partitions[streamPartitionKey(group.StreamID, partition)].nextOffset
+		progress.Lag = progress.NextOffset - progress.CommittedOffset
+		result = append(result, progress)
+	}
+	return result, nil
+}
+
 var _ StreamStore = (*FileStreamStore)(nil)
 
 type StreamStore interface {
@@ -582,4 +913,11 @@ type StreamStore interface {
 	Append(ctx context.Context, streamID string, partition int, payload []byte) (*models.StreamRecord, error)
 	Read(ctx context.Context, streamID string, partition int, fromOffset int64, limit int) ([]models.StreamRecord, error)
 	InspectPartition(ctx context.Context, streamID string, partition int) (*models.StreamPartition, error)
+	CreateConsumerGroup(ctx context.Context, spec models.ConsumerGroupSpec) (*models.ConsumerGroup, error)
+	GetConsumerGroup(ctx context.Context, groupID string) (*models.ConsumerGroup, error)
+	ReadConsumerGroup(ctx context.Context, groupID string, partition, limit int) ([]models.StreamRecord, error)
+	ReplayConsumerGroup(ctx context.Context, groupID string, partition int, fromOffset int64, limit int) ([]models.StreamRecord, error)
+	CommitConsumerGroupOffset(ctx context.Context, groupID string, partition int, offset int64) error
+	RecordConsumerGroupFailure(ctx context.Context, groupID string, partition int, reason string) error
+	InspectConsumerGroup(ctx context.Context, groupID string) ([]models.ConsumerGroupPartition, error)
 }
