@@ -189,6 +189,9 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 		if err := operationStore.Reset(ctx); err != nil {
 			return err
 		}
+		if err := progressStore.Reset(ctx); err != nil {
+			return err
+		}
 		if err := provider.Reset(ctx); err != nil {
 			return err
 		}

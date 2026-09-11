@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
@@ -242,6 +243,33 @@ func TestOperatorScopesBlobLifecycleAndRangeReads(t *testing.T) {
 	}
 	if _, err := operator.GetBlob(ctx, OperatorPrincipal{ScopeID: other.ID}, bucket.ID, "nested/file.txt"); !errors.Is(err, ErrOperatorScopeDenied) {
 		t.Fatalf("GetBlob(cross scope) error = %v, want ErrOperatorScopeDenied", err)
+	}
+}
+
+func TestFileOperatorResetRemovesApplyProgressState(t *testing.T) {
+	ctx := context.Background()
+	root := filepath.Join(t.TempDir(), "state")
+	operator, err := NewFileOperator(root, 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+
+	document := []byte(`{"version":"v1","resources":[{"type":"group","name":"platform","desiredState":"ready"}]}`)
+	if _, _, err := operator.applyDeployment(ctx, OperatorPrincipal{}, document, nil, deployment.ApplyOptions{
+		RequestID: "request-reset-progress", CorrelationID: "correlation-reset-progress",
+	}); err != nil {
+		t.Fatalf("applyDeployment() error = %v", err)
+	}
+	progressPath := filepath.Join(root, "apply-progress.json")
+	if _, err := os.Stat(progressPath); err != nil {
+		t.Fatalf("apply progress stat error = %v", err)
+	}
+
+	if err := operator.Reset(ctx, OperatorPrincipal{}); err != nil {
+		t.Fatalf("Reset() error = %v", err)
+	}
+	if _, err := os.Stat(progressPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("apply progress after reset: error = %v, want os.ErrNotExist", err)
 	}
 }
 
