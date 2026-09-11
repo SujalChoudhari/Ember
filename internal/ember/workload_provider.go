@@ -2,8 +2,11 @@ package ember
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +45,7 @@ var (
 	errProviderDuplicateVolume      = errors.New("provider volume duplicate")
 	errProviderResourceLimit        = errors.New("provider workload resource limit exceeded")
 	errProviderPrivilegeUnsupported = errors.New("provider workload privilege unsupported")
+	errProviderStatePersistence     = errors.New("provider state persistence failed")
 )
 
 // WorkloadProvider is the execution boundary for a workload resource. The
@@ -649,6 +653,99 @@ type MemoryWorkloadProvider struct {
 	volumes      map[string][]models.WorkloadVolume
 	nextVolumeID uint64
 	limits       WorkloadResourceLimits
+	statePath    string
+}
+
+type memoryWorkloadState struct {
+	Workloads    map[string]models.WorkloadStatus   `json:"workloads"`
+	Logs         map[string][]models.WorkloadLog    `json:"logs"`
+	Restarts     map[string]uint64                  `json:"restarts"`
+	Volumes      map[string][]models.WorkloadVolume `json:"volumes"`
+	NextVolumeID uint64                             `json:"nextVolumeId"`
+}
+
+func NewMemoryWorkloadProviderWithState(path string) (*MemoryWorkloadProvider, error) {
+	provider := &MemoryWorkloadProvider{
+		workloads: make(map[string]models.WorkloadStatus),
+		logs:      make(map[string][]models.WorkloadLog),
+		restarts:  make(map[string]uint64),
+		volumes:   make(map[string][]models.WorkloadVolume),
+		statePath: filepath.Clean(path),
+		limits: WorkloadResourceLimits{
+			MaxCPUMillis: models.MaxWorkloadCPUMillis, MaxMemoryBytes: models.MaxWorkloadMemoryBytes, MaxDiskBytes: models.MaxWorkloadDiskBytes,
+		},
+	}
+	data, err := os.ReadFile(provider.statePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return provider, nil
+	}
+	if err != nil {
+		return nil, errProviderStatePersistence
+	}
+	var state memoryWorkloadState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, errProviderStatePersistence
+	}
+	if state.Workloads != nil {
+		provider.workloads = state.Workloads
+	}
+	if state.Logs != nil {
+		provider.logs = state.Logs
+	}
+	if state.Restarts != nil {
+		provider.restarts = state.Restarts
+	}
+	if state.Volumes != nil {
+		provider.volumes = state.Volumes
+	}
+	provider.nextVolumeID = state.NextVolumeID
+	return provider, nil
+}
+
+func (provider *MemoryWorkloadProvider) Reset(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	provider.workloads = make(map[string]models.WorkloadStatus)
+	provider.logs = make(map[string][]models.WorkloadLog)
+	provider.restarts = make(map[string]uint64)
+	provider.volumes = make(map[string][]models.WorkloadVolume)
+	provider.nextVolumeID = 0
+	if provider.statePath == "" || provider.statePath == "." {
+		return nil
+	}
+	if err := os.Remove(provider.statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errProviderStatePersistence
+	}
+	return nil
+}
+
+func (provider *MemoryWorkloadProvider) persistLocked() error {
+	if provider.statePath == "" || provider.statePath == "." {
+		return nil
+	}
+	state := memoryWorkloadState{
+		Workloads: provider.workloads, Logs: provider.logs, Restarts: provider.restarts,
+		Volumes: provider.volumes, NextVolumeID: provider.nextVolumeID,
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return errProviderStatePersistence
+	}
+	if err := os.MkdirAll(filepath.Dir(provider.statePath), 0o700); err != nil {
+		return errProviderStatePersistence
+	}
+	temporary := provider.statePath + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return errProviderStatePersistence
+	}
+	if err := os.Rename(temporary, provider.statePath); err != nil {
+		_ = os.Remove(temporary)
+		return errProviderStatePersistence
+	}
+	return nil
 }
 
 func NewMemoryWorkloadProvider() *MemoryWorkloadProvider {
@@ -765,6 +862,10 @@ func (provider *MemoryWorkloadProvider) Create(ctx context.Context, resource mod
 	}
 	status := memoryWorkloadStatus(resource)
 	provider.workloads[resource.ID] = status
+	if err := provider.persistLocked(); err != nil {
+		delete(provider.workloads, resource.ID)
+		return models.WorkloadStatus{}, err
+	}
 	return status, nil
 }
 
@@ -780,6 +881,9 @@ func (provider *MemoryWorkloadProvider) Restart(ctx context.Context, resource mo
 	if _, exists := provider.workloads[resource.ID]; !exists {
 		return models.WorkloadStatus{}, errProviderNotFound
 	}
+	previousRestart := provider.restarts[resource.ID]
+	previousStatus := provider.workloads[resource.ID]
+	previousLogs := append([]models.WorkloadLog(nil), provider.logs[resource.ID]...)
 	provider.restarts[resource.ID]++
 	status := memoryWorkloadStatus(resource)
 	status.ExecutionID = fmt.Sprintf("restart:%s:%d", resource.ID, provider.restarts[resource.ID])
@@ -790,6 +894,12 @@ func (provider *MemoryWorkloadProvider) Restart(ctx context.Context, resource mo
 		Message:     "workload restarted",
 		ExecutionID: status.ExecutionID,
 	})
+	if err := provider.persistLocked(); err != nil {
+		provider.restarts[resource.ID] = previousRestart
+		provider.workloads[resource.ID] = previousStatus
+		provider.logs[resource.ID] = previousLogs
+		return models.WorkloadStatus{}, err
+	}
 	return status, nil
 }
 
@@ -941,11 +1051,21 @@ func (provider *MemoryWorkloadProvider) Update(ctx context.Context, resource mod
 	}
 	if !provider.withinResourceLimits(resource.Spec.WorkloadResources) {
 		status := workloadResourceLimitStatus(resource)
+		previousStatus := provider.workloads[resource.ID]
 		provider.workloads[resource.ID] = status
+		if err := provider.persistLocked(); err != nil {
+			provider.workloads[resource.ID] = previousStatus
+			return models.WorkloadStatus{}, err
+		}
 		return status, errProviderResourceLimit
 	}
+	previousStatus := provider.workloads[resource.ID]
 	status := memoryWorkloadStatus(resource)
 	provider.workloads[resource.ID] = status
+	if err := provider.persistLocked(); err != nil {
+		provider.workloads[resource.ID] = previousStatus
+		return models.WorkloadStatus{}, err
+	}
 	return status, nil
 }
 
@@ -958,13 +1078,24 @@ func (provider *MemoryWorkloadProvider) Delete(ctx context.Context, resource mod
 	}
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
-	if _, exists := provider.workloads[resource.ID]; !exists {
+	status, exists := provider.workloads[resource.ID]
+	if !exists {
 		return errProviderNotFound
 	}
+	logs := append([]models.WorkloadLog(nil), provider.logs[resource.ID]...)
+	restarts := provider.restarts[resource.ID]
+	volumes := append([]models.WorkloadVolume(nil), provider.volumes[resource.ID]...)
 	delete(provider.workloads, resource.ID)
 	delete(provider.logs, resource.ID)
 	delete(provider.restarts, resource.ID)
 	delete(provider.volumes, resource.ID)
+	if err := provider.persistLocked(); err != nil {
+		provider.workloads[resource.ID] = status
+		provider.logs[resource.ID] = logs
+		provider.restarts[resource.ID] = restarts
+		provider.volumes[resource.ID] = volumes
+		return err
+	}
 	return nil
 }
 

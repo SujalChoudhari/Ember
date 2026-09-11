@@ -76,6 +76,8 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 		default:
 			return ErrInvalidCLIRequest
 		}
+	case "workload":
+		return runCLIWorkload(ctx, operator, args[1:], output)
 	case "operation":
 		if len(args) < 2 {
 			return ErrInvalidCLIRequest
@@ -100,6 +102,132 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 	default:
 		return ErrInvalidCLIRequest
 	}
+}
+
+func runCLIWorkload(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	if len(args) < 1 {
+		return ErrInvalidCLIRequest
+	}
+	switch args[0] {
+	case "create":
+		return runCLICreateWorkload(ctx, operator, args[1:], output)
+	case "get":
+		return runCLIGetWorkload(ctx, operator, args[1:], output)
+	case "inspect":
+		return runCLIInspectWorkload(ctx, operator, args[1:], output)
+	case "restart":
+		return runCLIRestartWorkload(ctx, operator, args[1:], output)
+	case "delete":
+		return runCLIDeleteWorkload(ctx, operator, args[1:], output)
+	default:
+		return ErrInvalidCLIRequest
+	}
+}
+
+func runCLICreateWorkload(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("workload create")
+	scopeID := set.String("scope", "", "operator scope")
+	name := set.String("name", "", "workload name")
+	providerNamespace := set.String("provider-namespace", "", "provider namespace")
+	providerType := set.String("provider-type", "", "provider type")
+	providerVersion := set.String("provider-version", "", "provider version")
+	desiredState := set.String("desired-state", "", "desired state")
+	cpuMillis := set.Int64("cpu-millis", 0, "CPU millicores")
+	memoryBytes := set.Int64("memory-bytes", 0, "memory bytes")
+	diskBytes := set.Int64("disk-bytes", 0, "disk bytes")
+	privileged := set.Bool("privileged", false, "request privileged execution")
+	allowPrivilegeEscalation := set.Bool("allow-privilege-escalation", false, "allow privilege escalation")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	workload, err := operator.CreateWorkload(ctx, OperatorPrincipal{ScopeID: *scopeID}, models.ResourceSpec{
+		Type:     models.ResourceTypeWorkload,
+		Name:     *name,
+		ParentID: *scopeID,
+		Provider: models.ProviderMetadata{
+			Namespace: *providerNamespace,
+			Type:      *providerType,
+			Version:   *providerVersion,
+		},
+		DesiredState: models.ResourceState(*desiredState),
+		WorkloadResources: models.WorkloadResources{
+			CPUMillis: *cpuMillis, MemoryBytes: *memoryBytes, DiskBytes: *diskBytes,
+		},
+		SecurityContext: models.WorkloadSecurityContext{
+			Privileged:               privileged != nil && *privileged,
+			AllowPrivilegeEscalation: allowPrivilegeEscalation != nil && *allowPrivilegeEscalation,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Workload: workload})
+}
+
+func parseCLIWorkloadLookup(name string, args []string) (*string, *string, error) {
+	set := newCLIFlagSet(name)
+	scopeID := set.String("scope", "", "operator scope")
+	resourceID := set.String("id", "", "workload resource ID")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return nil, nil, ErrInvalidCLIRequest
+	}
+	return scopeID, resourceID, nil
+}
+
+func runCLIGetWorkload(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	scopeID, resourceID, err := parseCLIWorkloadLookup("workload get", args)
+	if err != nil {
+		return err
+	}
+	workload, err := operator.GetWorkload(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Workload: workload})
+}
+
+func runCLIInspectWorkload(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("workload inspect")
+	scopeID := set.String("scope", "", "operator scope")
+	resourceID := set.String("id", "", "workload resource ID")
+	limit := set.Int("limit", MaxObservabilityLogLimit, "maximum logs")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	report, err := operator.InspectWorkload(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, *limit)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Observability: report})
+}
+
+func runCLIRestartWorkload(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	scopeID, resourceID, err := parseCLIWorkloadLookup("workload restart", args)
+	if err != nil {
+		return err
+	}
+	workload, err := operator.RestartWorkload(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID)
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Workload: workload})
+}
+
+func runCLIDeleteWorkload(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	set := newCLIFlagSet("workload delete")
+	scopeID := set.String("scope", "", "operator scope")
+	resourceID := set.String("id", "", "workload resource ID")
+	confirm := set.Bool("confirm", false, "confirm workload deletion")
+	if err := set.Parse(args); err != nil || requireNoCLIArgs(set) != nil {
+		return ErrInvalidCLIRequest
+	}
+	if !*confirm {
+		return ErrDestructiveConfirmationRequired
+	}
+	if err := operator.DeleteWorkload(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID); err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{})
 }
 
 func runCLIDeployment(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
