@@ -12,6 +12,13 @@ line binary stores bounded state below the directory passed with
 
 No network service, cloud account, or external runtime is required.
 
+## Documentation
+
+Start with the [golden clean-machine quickstart](#golden-clean-machine-lifecycle),
+or use the [documentation index](docs/index.md) for the learner and contributor
+navigation. The index separates implemented behavior from planned work and
+non-goals.
+
 ## Build, package, and install
 
 ```text
