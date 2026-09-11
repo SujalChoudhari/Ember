@@ -3,6 +3,7 @@ package ember
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -535,10 +536,49 @@ func (operator *Operator) GetOperation(ctx context.Context, principal OperatorPr
 	if err != nil {
 		return nil, err
 	}
-	if _, _, err := operator.authorizeResource(ctx, principal, operation.ResourceID); err != nil {
+	if _, _, err := operator.authorizeResource(ctx, principal, operation.ResourceID); err == nil {
+		return operation, nil
+	} else if !strings.HasPrefix(operation.ResourceID, "/resources/") {
+		return nil, err
+	}
+
+	resource, resolveErr := operator.findLogicalResource(ctx, principal, operation.ResourceID)
+	if resolveErr != nil {
+		return nil, err
+	}
+	if _, _, err := operator.authorizeResource(ctx, principal, resource.ID); err != nil {
 		return nil, err
 	}
 	return operation, nil
+}
+
+func (operator *Operator) findLogicalResource(ctx context.Context, principal OperatorPrincipal, logicalID string) (*models.Resource, error) {
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	pending, err := operator.resources.ListResources(ctx, principal.ScopeID, persistence.MaxResourceListLimit)
+	if err != nil {
+		return nil, err
+	}
+	visited := make(map[string]struct{}, len(pending))
+	for len(pending) > 0 {
+		resource := pending[0]
+		pending = pending[1:]
+		if _, seen := visited[resource.ID]; seen {
+			continue
+		}
+		visited[resource.ID] = struct{}{}
+		candidate := "/resources/" + url.PathEscape(string(resource.Spec.Type)) + "/" + url.PathEscape(resource.Spec.Name)
+		if candidate == logicalID {
+			return &resource, nil
+		}
+		children, listErr := operator.resources.ListResources(ctx, resource.ID, persistence.MaxResourceListLimit)
+		if listErr != nil && !errors.Is(listErr, persistence.ErrResourceNotFound) {
+			return nil, listErr
+		}
+		pending = append(pending, children...)
+	}
+	return nil, persistence.ErrResourceNotFound
 }
 
 func (operator *Operator) ListOperations(ctx context.Context, principal OperatorPrincipal, resourceID string, limit int) ([]models.Operation, error) {
