@@ -178,6 +178,10 @@ func (store *FileDeadLetterStore) Redrive(ctx context.Context, requestID string,
 		store.mu.Unlock()
 		return RedriveOutcome{}, ErrRedriveNotFound
 	}
+	if _, exists := store.inflightDeliveries[delivery.ID]; exists {
+		store.mu.Unlock()
+		return RedriveOutcome{}, ErrRedriveInProgress
+	}
 	if len(store.redrives) >= store.options.MaxRecords {
 		store.mu.Unlock()
 		return RedriveOutcome{}, ErrRedriveFull
@@ -187,12 +191,14 @@ func (store *FileDeadLetterStore) Redrive(ctx context.Context, requestID string,
 		return RedriveOutcome{}, ErrInvalidConsumer
 	}
 	store.inflight[requestID] = struct{}{}
+	store.inflightDeliveries[delivery.ID] = struct{}{}
 	store.mu.Unlock()
 
 	outcome, deliverErr := Deliver(ctx, delivery, policy, consumer, wait)
 	if deliverErr != nil && !errors.Is(deliverErr, ErrDeliveryFailed) {
 		store.mu.Lock()
 		delete(store.inflight, requestID)
+		delete(store.inflightDeliveries, delivery.ID)
 		store.mu.Unlock()
 		return RedriveOutcome{}, deliverErr
 	}
@@ -200,6 +206,7 @@ func (store *FileDeadLetterStore) Redrive(ctx context.Context, requestID string,
 	if err := redrive.validate(); err != nil {
 		store.mu.Lock()
 		delete(store.inflight, requestID)
+		delete(store.inflightDeliveries, delivery.ID)
 		store.mu.Unlock()
 		return RedriveOutcome{}, ErrRedriveConflict
 	}
@@ -207,6 +214,7 @@ func (store *FileDeadLetterStore) Redrive(ctx context.Context, requestID string,
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	delete(store.inflight, requestID)
+	delete(store.inflightDeliveries, delivery.ID)
 	oldRecords := append([]DeadLetterRecord(nil), store.records...)
 	oldRedrives := append([]redriveDiskRecord(nil), store.redrives...)
 	store.redrives = append(store.redrives, redrive)
