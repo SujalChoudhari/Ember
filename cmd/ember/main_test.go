@@ -45,3 +45,40 @@ func TestRunExecutesSharedCLIAgainstFileOperator(t *testing.T) {
 		t.Fatalf("get output = %#v, want resource %q", fetched, created.Resource.ID)
 	}
 }
+
+func TestRunSupportsDeploymentInspectionJourney(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	document := `{"version":"v1","resources":[{"type":"group","name":"platform","desiredState":"ready"}]}`
+	var stdout, stderr bytes.Buffer
+	call := func(args ...string) ember.OperatorResponse {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := run(append([]string{"--state-dir", stateDir}, args...), &stdout, &stderr); code != 0 {
+			t.Fatalf("run(%v) code = %d, stderr = %q", args, code, stderr.String())
+		}
+		var response ember.OperatorResponse
+		if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+			t.Fatalf("decode %v output %q error = %v", args, stdout.String(), err)
+		}
+		return response
+	}
+
+	planned := call("deployment", "plan", "--document", document)
+	if planned.Plan == nil || planned.Plan.Summary.Create != 1 {
+		t.Fatalf("deployment plan = %#v, want one create", planned)
+	}
+	applied := call("deployment", "apply", "--document", document, "--request-id", "request-journey", "--correlation-id", "correlation-journey")
+	if applied.Apply == nil || len(applied.Apply.Operations) != 1 || applied.Apply.Operations[0].ID == "" {
+		t.Fatalf("deployment apply = %#v, want one inspectable operation", applied)
+	}
+
+	resource := call("resource", "get", "--id", "resource-00000001")
+	if resource.Resource == nil || resource.Resource.Spec.Name != "platform" {
+		t.Fatalf("resource inspection = %#v, want applied platform resource", resource)
+	}
+	operation := call("operation", "get", "--id", applied.Apply.Operations[0].ID)
+	if operation.Operation == nil || operation.Operation.ID != applied.Apply.Operations[0].ID || operation.Operation.RequestID != "request-journey" || operation.Operation.CorrelationID != "correlation-journey" {
+		t.Fatalf("operation inspection = %#v, want applied operation identifiers", operation)
+	}
+}

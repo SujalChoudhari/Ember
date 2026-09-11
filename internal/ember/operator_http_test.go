@@ -699,6 +699,22 @@ func TestHTTPDeploymentFlowsMatchCLIContract(t *testing.T) {
 		t.Fatalf("HTTP apply contract = %s, want bounded redacted output", httpApplyRecorder.Body.String())
 	}
 
+	httpResource := operatorHTTPCall(t, httpApplyHandler, http.MethodGet, "/v1/resources/resource-00000001", "", nil)
+	if httpResource.Code != http.StatusOK || !strings.Contains(httpResource.Body.String(), `"Name":"platform"`) {
+		t.Fatalf("HTTP resource inspection = %d %s, want applied platform resource", httpResource.Code, httpResource.Body.String())
+	}
+	httpOperation := operatorHTTPCall(t, httpApplyHandler, http.MethodGet, "/v1/operations/"+httpApply.Apply.Operations[0].ID, "", nil)
+	if httpOperation.Code != http.StatusOK {
+		t.Fatalf("HTTP operation inspection status = %d, body = %s", httpOperation.Code, httpOperation.Body.String())
+	}
+	var inspectedOperation OperatorResponse
+	if err := json.Unmarshal(httpOperation.Body.Bytes(), &inspectedOperation); err != nil {
+		t.Fatalf("decode HTTP operation inspection error = %v", err)
+	}
+	if inspectedOperation.Operation == nil || inspectedOperation.Operation.RequestID != "request-deployment" || inspectedOperation.Operation.CorrelationID != "correlation-deployment" {
+		t.Fatalf("HTTP operation inspection = %#v, want applied operation identifiers", inspectedOperation)
+	}
+
 	var invalidCLIOutput bytes.Buffer
 	invalidDocument := `{"version":"unsupported","resources":[]}`
 	cliErr := RunCLI(context.Background(), cliOperator, []string{"deployment", "plan", "--document", invalidDocument}, &invalidCLIOutput)
