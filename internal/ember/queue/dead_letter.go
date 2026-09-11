@@ -105,12 +105,13 @@ type deadLetterDiskState struct {
 // FileDeadLetterStore persists bounded, payload-redacted dead-letter metadata
 // in one private JSON snapshot.
 type FileDeadLetterStore struct {
-	mu       sync.RWMutex
-	path     string
-	options  DeadLetterStoreOptions
-	records  []DeadLetterRecord
-	redrives []redriveDiskRecord
-	inflight map[string]struct{}
+	mu                 sync.RWMutex
+	path               string
+	options            DeadLetterStoreOptions
+	records            []DeadLetterRecord
+	redrives           []redriveDiskRecord
+	inflight           map[string]struct{}
+	inflightDeliveries map[string]struct{}
 }
 
 func NewFileDeadLetterStore(path string, options DeadLetterStoreOptions) (*FileDeadLetterStore, error) {
@@ -130,7 +131,7 @@ func NewFileDeadLetterStore(path string, options DeadLetterStoreOptions) (*FileD
 		return nil, ErrDeadLetterStoreIO
 	}
 
-	store := &FileDeadLetterStore{path: path, options: normalized, inflight: make(map[string]struct{})}
+	store := &FileDeadLetterStore{path: path, options: normalized, inflight: make(map[string]struct{}), inflightDeliveries: make(map[string]struct{})}
 	if err := store.load(); err != nil {
 		return nil, err
 	}

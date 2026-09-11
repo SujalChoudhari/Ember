@@ -99,3 +99,64 @@ func TestFileDeadLetterStoreRedrivesIdempotentlyAndSurvivesRestart(t *testing.T)
 		t.Fatalf("Redrive() conflicting replay error = %v, want ErrRedriveConflict", err)
 	}
 }
+
+func TestFileDeadLetterStoreRejectsConcurrentRecoveryOfSameDelivery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dead-letters.json")
+	store, err := NewFileDeadLetterStore(path, DeadLetterStoreOptions{MaxRecords: 2})
+	if err != nil {
+		t.Fatalf("NewFileDeadLetterStore() error = %v", err)
+	}
+	delivery := Delivery{ID: "message-1", CorrelationID: "correlation-1", Payload: []byte("payload")}
+	if _, err := DeliverWithDeadLetter(
+		context.Background(), delivery, RetryPolicy{},
+		func(context.Context, Delivery) error { return errors.New("consumer failure") },
+		func(context.Context, time.Duration) error { return nil }, store,
+	); !errors.Is(err, ErrDeliveryFailed) {
+		t.Fatalf("DeliverWithDeadLetter() error = %v, want ErrDeliveryFailed", err)
+	}
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	consumer := func(context.Context, Delivery) error {
+		started <- struct{}{}
+		<-release
+		return nil
+	}
+	type result struct {
+		outcome RedriveOutcome
+		err     error
+	}
+	results := make(chan result, 2)
+	for _, requestID := range []string{"request-1", "request-2"} {
+		go func(requestID string) {
+			outcome, err := store.Redrive(context.Background(), requestID, delivery, RetryPolicy{}, consumer, nil)
+			results <- result{outcome: outcome, err: err}
+		}(requestID)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent redrive did not start")
+	}
+	select {
+	case <-started:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+
+	var successes, inProgress int
+	for range 2 {
+		result := <-results
+		switch {
+		case result.err == nil && result.outcome.Status == DeliveryStatusSucceeded:
+			successes++
+		case errors.Is(result.err, ErrRedriveInProgress):
+			inProgress++
+		default:
+			t.Fatalf("concurrent Redrive() result = %#v, want one success and one in-progress error", result)
+		}
+	}
+	if successes != 1 || inProgress != 1 {
+		t.Fatalf("concurrent Redrive() results = successes %d, in-progress %d; want one each", successes, inProgress)
+	}
+}
