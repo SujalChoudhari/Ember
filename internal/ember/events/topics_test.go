@@ -3,8 +3,13 @@ package events
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/SujalChoudhari/Ember/internal/ember/queue"
 )
 
 func TestTopicBrokerRoutesMatchingEventsWithinScopeAndOwner(t *testing.T) {
@@ -104,5 +109,49 @@ func TestTopicBrokerLifecycleIsBoundedAndExplicit(t *testing.T) {
 	}
 	if _, err := broker.GetTopic(ctx, "scope-a", topic.ID); !errors.Is(err, ErrTopicNotFound) {
 		t.Fatalf("GetTopic(deleted) error = %v, want ErrTopicNotFound", err)
+	}
+}
+
+func TestTopicBrokerDeliverWithMetricsReportsAcknowledgementRetryDeadLetterAndIdentity(t *testing.T) {
+	broker, err := NewTopicBroker(TopicBrokerOptions{MaxTopics: 1, MaxSubscriptions: 1})
+	if err != nil {
+		t.Fatalf("NewTopicBroker() error = %v", err)
+	}
+	ctx := context.Background()
+	topic, err := broker.CreateTopic(ctx, "scope-a", "publisher", "events")
+	if err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	if _, err := broker.CreateSubscription(ctx, "scope-a", "consumer-a", topic.ID, "all", EventFilter{}); err != nil {
+		t.Fatalf("CreateSubscription() error = %v", err)
+	}
+	deadLetters, err := queue.NewFileDeadLetterStore(filepath.Join(t.TempDir(), "dead-letters.json"), queue.DeadLetterStoreOptions{MaxRecords: 2})
+	if err != nil {
+		t.Fatalf("NewFileDeadLetterStore() error = %v", err)
+	}
+	metrics := NewMetrics()
+	failed := Event{ID: "event-1", CorrelationID: "correlation-1", Type: "resource.updated", Payload: []byte("opaque")}
+	var attempts int
+	reports, err := broker.DeliverWithMetrics(ctx, "scope-a", "consumer-a", topic.ID, failed, queue.RetryPolicy{MaxRetries: 1}, func(context.Context, Subscription, Event) error {
+		attempts++
+		return errors.New("consumer failure")
+	}, func(context.Context, time.Duration) error { return nil }, deadLetters, metrics)
+	if !errors.Is(err, queue.ErrDeliveryFailed) || len(reports) != 1 || reports[0].Outcome.Status != queue.DeliveryStatusFailed || reports[0].Outcome.Attempts != 2 || attempts != 2 {
+		t.Fatalf("DeliverWithMetrics(failure) = %#v, %v, attempts=%d; want bounded terminal failure", reports, err, attempts)
+	}
+	if reports[0].Outcome.DeliveryID == failed.ID || !strings.Contains(reports[0].Outcome.DeliveryID, failed.ID) {
+		t.Fatalf("scoped delivery identity = %q, want original event identity plus subscription", reports[0].Outcome.DeliveryID)
+	}
+
+	succeeded := failed
+	succeeded.ID = "event-2"
+	reports, err = broker.DeliverWithMetrics(ctx, "scope-a", "consumer-a", topic.ID, succeeded, queue.RetryPolicy{}, func(context.Context, Subscription, Event) error {
+		return nil
+	}, nil, deadLetters, metrics)
+	if err != nil || len(reports) != 1 || reports[0].Outcome.Status != queue.DeliveryStatusSucceeded || reports[0].Outcome.Attempts != 1 {
+		t.Fatalf("DeliverWithMetrics(success) = %#v, %v; want acknowledged delivery", reports, err)
+	}
+	if snapshot := metrics.Snapshot(); snapshot.DeliveryCount != 2 || snapshot.SuccessCount != 1 || snapshot.FailureCount != 1 || snapshot.RetryCount != 1 || snapshot.DeadLetterCount != 1 {
+		t.Fatalf("Metrics.Snapshot() = %#v, want bounded acknowledgement/retry/dead-letter counts", snapshot)
 	}
 }
