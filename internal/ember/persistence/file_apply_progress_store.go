@@ -235,6 +235,20 @@ func (store *FileApplyProgressStore) Get(ctx context.Context, recordID string) (
 	return &copy, nil
 }
 
+func (store *FileApplyProgressStore) Reset(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := os.Remove(store.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ErrApplyProgressStoreIO
+	}
+	store.records = make(map[string]models.ApplyProgressRecord)
+	store.requests = make(map[string]string)
+	return nil
+}
+
 func (store *FileApplyProgressStore) List(ctx context.Context, limit int) ([]models.ApplyProgressRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
