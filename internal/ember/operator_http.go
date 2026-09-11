@@ -52,6 +52,21 @@ type workloadCreateRequest struct {
 	SecurityContext   models.WorkloadSecurityContext `json:"securityContext"`
 }
 
+type networkCreateRequest struct {
+	Name string `json:"name"`
+}
+
+type networkPortRequest struct {
+	WorkloadID string                 `json:"workloadId"`
+	Number     uint16                 `json:"number"`
+	Protocol   models.NetworkProtocol `json:"protocol"`
+}
+
+type networkEndpointRequest struct {
+	PortID string `json:"portId"`
+	Name   string `json:"name"`
+}
+
 func (request workloadCreateRequest) resourceSpec(scopeID string) models.ResourceSpec {
 	return models.ResourceSpec{
 		Type:              models.ResourceTypeWorkload,
@@ -99,6 +114,30 @@ func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, reques
 	}
 	if strings.HasPrefix(request.URL.Path, "/v1/workloads/") {
 		handler.workloadSubpath(writer, request)
+		return
+	}
+	if request.URL.Path == "/v1/networks" {
+		switch request.Method {
+		case http.MethodPost:
+			handler.createNetwork(writer, request)
+		case http.MethodGet:
+			handler.listNetworks(writer, request)
+		default:
+			writer.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		}
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/v1/networks/") {
+		handler.networkSubpath(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/v1/network-ports/") {
+		handler.networkPort(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/v1/network-endpoints/") {
+		handler.networkEndpoint(writer, request)
 		return
 	}
 	if request.URL.Path == "/v1/resources" {
@@ -276,6 +315,251 @@ func (handler *operatorHTTPHandler) listResources(writer http.ResponseWriter, re
 		return
 	}
 	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Resources: resources})
+}
+
+func networkIDFromPath(path string) (string, error) {
+	encoded := strings.TrimPrefix(path, "/v1/networks/")
+	if encoded == "" || strings.Contains(encoded, "/") {
+		return "", errors.New("invalid network path")
+	}
+	id, err := url.PathUnescape(encoded)
+	if err != nil || id == "" {
+		return "", errors.New("invalid network path")
+	}
+	return id, nil
+}
+
+func networkNestedPath(path string) (string, string, error) {
+	rest := strings.TrimPrefix(path, "/v1/networks/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", errors.New("invalid network path")
+	}
+	id, err := url.PathUnescape(parts[0])
+	if err != nil || id == "" {
+		return "", "", errors.New("invalid network path")
+	}
+	return id, parts[1], nil
+}
+
+func networkChildIDFromPath(path, prefix, message string) (string, error) {
+	encoded := strings.TrimPrefix(path, prefix)
+	if encoded == "" || strings.Contains(encoded, "/") {
+		return "", errors.New(message)
+	}
+	id, err := url.PathUnescape(encoded)
+	if err != nil || id == "" {
+		return "", errors.New(message)
+	}
+	return id, nil
+}
+
+func (handler *operatorHTTPHandler) createNetwork(writer http.ResponseWriter, request *http.Request) {
+	var body networkCreateRequest
+	if err := decodeOperatorJSON(writer, request, &body); err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	network, err := handler.operator.CreateNetwork(request.Context(), operatorPrincipal(request), body.Name)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusCreated, &OperatorResponse{Network: network})
+}
+
+func (handler *operatorHTTPHandler) listNetworks(writer http.ResponseWriter, request *http.Request) {
+	limit, err := queryLimit(request, persistence.MaxNetworkListLimit)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	networks, err := handler.operator.ListNetworks(request.Context(), operatorPrincipal(request), limit)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Networks: networks})
+}
+
+func (handler *operatorHTTPHandler) createNetworkPort(writer http.ResponseWriter, request *http.Request, networkID string) {
+	var body networkPortRequest
+	if err := decodeOperatorJSON(writer, request, &body); err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	port, err := handler.operator.AllocateNetworkPort(request.Context(), operatorPrincipal(request), networkID, body.WorkloadID, body.Number, body.Protocol)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusCreated, &OperatorResponse{Port: port})
+}
+
+func (handler *operatorHTTPHandler) listNetworkPorts(writer http.ResponseWriter, request *http.Request, networkID string) {
+	limit, err := queryLimit(request, persistence.MaxNetworkListLimit)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	ports, err := handler.operator.ListNetworkPorts(request.Context(), operatorPrincipal(request), networkID, limit)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Ports: ports})
+}
+
+func (handler *operatorHTTPHandler) createNetworkEndpoint(writer http.ResponseWriter, request *http.Request, networkID string) {
+	var body networkEndpointRequest
+	if err := decodeOperatorJSON(writer, request, &body); err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	endpoint, err := handler.operator.PublishNetworkEndpoint(request.Context(), operatorPrincipal(request), networkID, body.PortID, body.Name)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusCreated, &OperatorResponse{Endpoint: endpoint})
+}
+
+func (handler *operatorHTTPHandler) listNetworkEndpoints(writer http.ResponseWriter, request *http.Request, networkID string) {
+	limit, err := queryLimit(request, persistence.MaxNetworkListLimit)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	endpoints, err := handler.operator.ListNetworkEndpoints(request.Context(), operatorPrincipal(request), networkID, limit)
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Endpoints: endpoints})
+}
+
+func (handler *operatorHTTPHandler) networkSubpath(writer http.ResponseWriter, request *http.Request) {
+	if !strings.Contains(strings.TrimPrefix(request.URL.Path, "/v1/networks/"), "/") {
+		networkID, err := networkIDFromPath(request.URL.Path)
+		if err != nil {
+			writeOperatorError(writer, http.StatusBadRequest, err)
+			return
+		}
+		switch request.Method {
+		case http.MethodGet:
+			network, getErr := handler.operator.GetNetwork(request.Context(), operatorPrincipal(request), networkID)
+			if getErr != nil {
+				writeOperatorError(writer, operatorErrorStatus(getErr), getErr)
+				return
+			}
+			writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Network: network})
+		case http.MethodDelete:
+			if err := requireHTTPConfirmation(request); err != nil {
+				writeOperatorError(writer, operatorErrorStatus(err), err)
+				return
+			}
+			if deleteErr := handler.operator.DeleteNetwork(request.Context(), operatorPrincipal(request), networkID); deleteErr != nil {
+				writeOperatorError(writer, operatorErrorStatus(deleteErr), deleteErr)
+				return
+			}
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			writer.Header().Set("Allow", http.MethodGet+", "+http.MethodDelete)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		}
+		return
+	}
+	networkID, suffix, err := networkNestedPath(request.URL.Path)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	switch suffix {
+	case "ports":
+		switch request.Method {
+		case http.MethodGet:
+			handler.listNetworkPorts(writer, request, networkID)
+		case http.MethodPost:
+			handler.createNetworkPort(writer, request, networkID)
+		default:
+			writer.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		}
+	case "endpoints":
+		switch request.Method {
+		case http.MethodGet:
+			handler.listNetworkEndpoints(writer, request, networkID)
+		case http.MethodPost:
+			handler.createNetworkEndpoint(writer, request, networkID)
+		default:
+			writer.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		}
+	default:
+		http.NotFound(writer, request)
+	}
+}
+
+func (handler *operatorHTTPHandler) networkPort(writer http.ResponseWriter, request *http.Request) {
+	portID, err := networkChildIDFromPath(request.URL.Path, "/v1/network-ports/", "invalid network port path")
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	principal := operatorPrincipal(request)
+	switch request.Method {
+	case http.MethodGet:
+		port, getErr := handler.operator.GetNetworkPort(request.Context(), principal, portID)
+		if getErr != nil {
+			writeOperatorError(writer, operatorErrorStatus(getErr), getErr)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Port: port})
+	case http.MethodDelete:
+		if err := requireHTTPConfirmation(request); err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		if deleteErr := handler.operator.DeleteNetworkPort(request.Context(), principal, portID); deleteErr != nil {
+			writeOperatorError(writer, operatorErrorStatus(deleteErr), deleteErr)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	default:
+		writer.Header().Set("Allow", http.MethodGet+", "+http.MethodDelete)
+		writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+	}
+}
+
+func (handler *operatorHTTPHandler) networkEndpoint(writer http.ResponseWriter, request *http.Request) {
+	endpointID, err := networkChildIDFromPath(request.URL.Path, "/v1/network-endpoints/", "invalid network endpoint path")
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	principal := operatorPrincipal(request)
+	switch request.Method {
+	case http.MethodGet:
+		endpoint, getErr := handler.operator.GetNetworkEndpoint(request.Context(), principal, endpointID)
+		if getErr != nil {
+			writeOperatorError(writer, operatorErrorStatus(getErr), getErr)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Endpoint: endpoint})
+	case http.MethodDelete:
+		if err := requireHTTPConfirmation(request); err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		if deleteErr := handler.operator.DeleteNetworkEndpoint(request.Context(), principal, endpointID); deleteErr != nil {
+			writeOperatorError(writer, operatorErrorStatus(deleteErr), deleteErr)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	default:
+		writer.Header().Set("Allow", http.MethodGet+", "+http.MethodDelete)
+		writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+	}
 }
 
 func (handler *operatorHTTPHandler) createWorkload(writer http.ResponseWriter, request *http.Request) {
@@ -818,11 +1102,17 @@ func operatorErrorStatus(err error) int {
 	if errors.Is(err, ErrOperatorScopeDenied) || errors.Is(err, ErrWorkloadScopeDenied) || errors.Is(err, ErrWorkloadPrivilegeDenied) {
 		return http.StatusForbidden
 	}
-	if errors.Is(err, persistence.ErrResourceNotFound) || errors.Is(err, persistence.ErrOperationNotFound) || errors.Is(err, persistence.ErrBlobObjectNotFound) || errors.Is(err, persistence.ErrApplyProgressNotFound) || errors.Is(err, persistence.ErrRecoveryNotFound) || errors.Is(err, ErrWorkloadNotFound) || errors.Is(err, ErrWorkloadProviderNotFound) {
+	if errors.Is(err, persistence.ErrResourceNotFound) || errors.Is(err, persistence.ErrOperationNotFound) || errors.Is(err, persistence.ErrBlobObjectNotFound) || errors.Is(err, persistence.ErrApplyProgressNotFound) || errors.Is(err, persistence.ErrRecoveryNotFound) || errors.Is(err, persistence.ErrNetworkNotFound) || errors.Is(err, persistence.ErrNetworkPortNotFound) || errors.Is(err, persistence.ErrNetworkEndpointNotFound) || errors.Is(err, ErrWorkloadNotFound) || errors.Is(err, ErrWorkloadProviderNotFound) {
 		return http.StatusNotFound
+	}
+	if errors.Is(err, persistence.ErrDuplicateNetwork) || errors.Is(err, persistence.ErrNetworkPortConflict) || errors.Is(err, persistence.ErrNetworkPortAlreadyPublished) || errors.Is(err, persistence.ErrDuplicateNetworkEndpoint) || errors.Is(err, persistence.ErrNetworkHasDependents) {
+		return http.StatusConflict
 	}
 	if errors.Is(err, persistence.ErrResourceLockConflict) || errors.Is(err, persistence.ErrResourceLockNotHeld) || errors.Is(err, persistence.ErrResourceLockNotOwner) || errors.Is(err, persistence.ErrResourceLocked) || errors.Is(err, persistence.ErrResourceHasDependents) || errors.Is(err, persistence.ErrOperationRequestConflict) || errors.Is(err, persistence.ErrRecoveryRequestConflict) || errors.Is(err, deployment.ErrDestructiveApprovalRequired) || errors.Is(err, ErrDestructiveConfirmationRequired) {
 		return http.StatusConflict
+	}
+	if errors.Is(err, models.ErrInvalidNetwork) || errors.Is(err, models.ErrInvalidNetworkPort) || errors.Is(err, models.ErrInvalidNetworkEndpoint) || errors.Is(err, persistence.ErrInvalidNetworkScope) || errors.Is(err, persistence.ErrInvalidNetworkListLimit) {
+		return http.StatusBadRequest
 	}
 	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, ErrInvalidOperatorListLimit) || errors.Is(err, ErrInvalidWorkloadSpec) || errors.Is(err, ErrInvalidWorkloadLogLimit) || errors.Is(err, ErrInvalidObservabilityLogLimit) || errors.Is(err, ErrWorkloadResourceLimit) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) || errors.Is(err, persistence.ErrInvalidBlobListLimit) || errors.Is(err, persistence.ErrInvalidApplyProgressListLimit) || errors.Is(err, persistence.ErrInvalidRecoveryListLimit) || errors.Is(err, deployment.ErrMalformedDocument) || errors.Is(err, deployment.ErrDocumentTooLarge) || errors.Is(err, deployment.ErrInvalidDocument) || errors.Is(err, deployment.ErrInvalidResolution) || errors.Is(err, deployment.ErrInvalidApplyRequest) || errors.Is(err, deployment.ErrApplyDependency) || errors.Is(err, deployment.ErrInvalidRecoveryRequest) || errors.Is(err, deployment.ErrUnsupportedRecoveryFailure) || errors.Is(err, deployment.ErrRecoveryApplyNotReady) {
 		return http.StatusBadRequest

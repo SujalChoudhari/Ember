@@ -22,6 +22,7 @@ var (
 	ErrOperatorBlobRecoveryUnavailable = errors.New("operator blob recovery unavailable")
 	ErrOperatorDeploymentUnavailable   = errors.New("operator deployment inspection unavailable")
 	ErrOperatorWorkloadUnavailable     = errors.New("operator workload inspection unavailable")
+	ErrOperatorNetworkUnavailable      = errors.New("operator network inspection unavailable")
 	ErrDestructiveConfirmationRequired = errors.New("explicit confirmation is required for destructive actions")
 	ErrInvalidOperatorListLimit        = errors.New("invalid operator list limit")
 )
@@ -53,6 +54,7 @@ type Operator struct {
 	reset         func(context.Context) error
 	deployment    DeploymentControlPlane
 	workloads     WorkloadControlPlane
+	networks      NetworkControlPlane
 	observability RuntimeObservability
 	applyProgress persistence.ApplyProgressStore
 }
@@ -73,6 +75,12 @@ type OperatorResponse struct {
 	Recovery        *models.RecoveryRecord       `json:"recovery,omitempty"`
 	Recoveries      []models.RecoveryRecord      `json:"recoveries,omitempty"`
 	Workload        *WorkloadView                `json:"workload,omitempty"`
+	Network         *models.Network              `json:"network,omitempty"`
+	Networks        []models.Network             `json:"networks,omitempty"`
+	Port            *models.NetworkPort          `json:"port,omitempty"`
+	Ports           []models.NetworkPort         `json:"ports,omitempty"`
+	Endpoint        *models.NetworkEndpoint      `json:"endpoint,omitempty"`
+	Endpoints       []models.NetworkEndpoint     `json:"endpoints,omitempty"`
 	Observability   *RuntimeObservabilityReport  `json:"observability,omitempty"`
 	Plan            *deployment.DeploymentPlan   `json:"plan,omitempty"`
 	Resolution      *deployment.ResolvedDocument `json:"resolution,omitempty"`
@@ -84,6 +92,10 @@ func NewOperator(resources ResourceControlPlane, blobs persistence.BlobStore, op
 	return newOperator(resources, blobs, operations, reset, nil)
 }
 
+func NewOperatorWithNetwork(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error, networks NetworkControlPlane) (*Operator, error) {
+	return newOperatorWithRuntimeAndNetwork(resources, blobs, operations, reset, nil, nil, nil, networks)
+}
+
 // NewOperatorWithDeployment composes the operator with the existing bounded
 // deployment inspection and recovery control plane.
 func NewOperatorWithDeployment(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error, deployment DeploymentControlPlane) (*Operator, error) {
@@ -91,10 +103,14 @@ func NewOperatorWithDeployment(resources ResourceControlPlane, blobs persistence
 }
 
 func newOperator(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error, deployment DeploymentControlPlane) (*Operator, error) {
-	return newOperatorWithRuntime(resources, blobs, operations, reset, deployment, nil, nil)
+	return newOperatorWithRuntimeAndNetwork(resources, blobs, operations, reset, deployment, nil, nil, nil)
 }
 
 func newOperatorWithRuntime(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error, deployment DeploymentControlPlane, workloads WorkloadControlPlane, observability RuntimeObservability) (*Operator, error) {
+	return newOperatorWithRuntimeAndNetwork(resources, blobs, operations, reset, deployment, workloads, observability, nil)
+}
+
+func newOperatorWithRuntimeAndNetwork(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error, deployment DeploymentControlPlane, workloads WorkloadControlPlane, observability RuntimeObservability, networks NetworkControlPlane) (*Operator, error) {
 	if resources == nil || blobs == nil || operations == nil || reset == nil {
 		return nil, ErrInvalidOperator
 	}
@@ -105,6 +121,7 @@ func newOperatorWithRuntime(resources ResourceControlPlane, blobs persistence.Bl
 		reset:         reset,
 		deployment:    deployment,
 		workloads:     workloads,
+		networks:      networks,
 		observability: observability,
 	}, nil
 }
@@ -144,11 +161,22 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	if err != nil {
 		return nil, err
 	}
+	networkStore, err := persistence.NewFileNetworkStore(filepath.Join(root, "networks.json"))
+	if err != nil {
+		return nil, err
+	}
+	networkManager, err := NewNetworkManager(networkStore)
+	if err != nil {
+		return nil, err
+	}
 	coordinator, err := NewResourceOperationCoordinator(operationStore, auditStore)
 	if err != nil {
 		return nil, err
 	}
 	reset := func(ctx context.Context) error {
+		if err := networkStore.Reset(ctx); err != nil {
+			return err
+		}
 		if err := blobStore.Reset(ctx); err != nil {
 			return err
 		}
@@ -176,7 +204,7 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	if err != nil {
 		return nil, err
 	}
-	operator, err := newOperatorWithRuntime(resourceManager, blobStore, coordinator, reset, nil, workloads, observability)
+	operator, err := newOperatorWithRuntimeAndNetwork(resourceManager, blobStore, coordinator, reset, nil, workloads, observability, networkManager)
 	if err != nil {
 		return nil, err
 	}
@@ -225,6 +253,115 @@ func (operator *Operator) InspectWorkload(ctx context.Context, principal Operato
 		return nil, err
 	}
 	return operator.observability.InspectWorkload(ctx, principal.ScopeID, resourceID, logLimit)
+}
+
+func (operator *Operator) networkScope(principal OperatorPrincipal) (string, error) {
+	if operator.networks == nil {
+		return "", ErrOperatorNetworkUnavailable
+	}
+	if err := principal.validate(); err != nil {
+		return "", err
+	}
+	if principal.ScopeID == "" {
+		return "", ErrOperatorScopeDenied
+	}
+	return principal.ScopeID, nil
+}
+
+func (operator *Operator) CreateNetwork(ctx context.Context, principal OperatorPrincipal, name string) (*models.Network, error) {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return nil, err
+	}
+	return operator.networks.CreateNetwork(ctx, scopeID, name)
+}
+
+func (operator *Operator) GetNetwork(ctx context.Context, principal OperatorPrincipal, networkID string) (*models.Network, error) {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return nil, err
+	}
+	return operator.networks.GetNetwork(ctx, scopeID, networkID)
+}
+
+func (operator *Operator) ListNetworks(ctx context.Context, principal OperatorPrincipal, limit int) ([]models.Network, error) {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return nil, err
+	}
+	return operator.networks.ListNetworks(ctx, scopeID, limit)
+}
+
+func (operator *Operator) DeleteNetwork(ctx context.Context, principal OperatorPrincipal, networkID string) error {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return err
+	}
+	return operator.networks.DeleteNetwork(ctx, scopeID, networkID)
+}
+
+func (operator *Operator) AllocateNetworkPort(ctx context.Context, principal OperatorPrincipal, networkID, workloadID string, number uint16, protocol models.NetworkProtocol) (*models.NetworkPort, error) {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return nil, err
+	}
+	return operator.networks.AllocatePort(ctx, scopeID, networkID, workloadID, number, protocol)
+}
+
+func (operator *Operator) GetNetworkPort(ctx context.Context, principal OperatorPrincipal, portID string) (*models.NetworkPort, error) {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return nil, err
+	}
+	return operator.networks.GetPort(ctx, scopeID, portID)
+}
+
+func (operator *Operator) ListNetworkPorts(ctx context.Context, principal OperatorPrincipal, networkID string, limit int) ([]models.NetworkPort, error) {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return nil, err
+	}
+	return operator.networks.ListPorts(ctx, scopeID, networkID, limit)
+}
+
+func (operator *Operator) DeleteNetworkPort(ctx context.Context, principal OperatorPrincipal, portID string) error {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return err
+	}
+	return operator.networks.DeletePort(ctx, scopeID, portID)
+}
+
+func (operator *Operator) PublishNetworkEndpoint(ctx context.Context, principal OperatorPrincipal, networkID, portID, name string) (*models.NetworkEndpoint, error) {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return nil, err
+	}
+	return operator.networks.PublishEndpoint(ctx, scopeID, networkID, portID, name)
+}
+
+func (operator *Operator) GetNetworkEndpoint(ctx context.Context, principal OperatorPrincipal, endpointID string) (*models.NetworkEndpoint, error) {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return nil, err
+	}
+	return operator.networks.ResolveEndpoint(ctx, scopeID, endpointID)
+}
+
+func (operator *Operator) ListNetworkEndpoints(ctx context.Context, principal OperatorPrincipal, networkID string, limit int) ([]models.NetworkEndpoint, error) {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return nil, err
+	}
+	return operator.networks.ListEndpoints(ctx, scopeID, networkID, limit)
+}
+
+func (operator *Operator) DeleteNetworkEndpoint(ctx context.Context, principal OperatorPrincipal, endpointID string) error {
+	scopeID, err := operator.networkScope(principal)
+	if err != nil {
+		return err
+	}
+	return operator.networks.DeleteEndpoint(ctx, scopeID, endpointID)
 }
 
 func (operator *Operator) resourceLookupScope(principal OperatorPrincipal, resourceID string) string {
