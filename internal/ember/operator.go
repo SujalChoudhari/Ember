@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
+	"github.com/SujalChoudhari/Ember/internal/ember/events"
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
@@ -20,6 +21,7 @@ var (
 	ErrOperatorBucketRequired          = errors.New("operator resource is not a bucket")
 	ErrOperatorBlobRecoveryUnavailable = errors.New("operator blob recovery unavailable")
 	ErrOperatorDeploymentUnavailable   = errors.New("operator deployment inspection unavailable")
+	ErrOperatorWorkloadUnavailable     = errors.New("operator workload inspection unavailable")
 	ErrDestructiveConfirmationRequired = errors.New("explicit confirmation is required for destructive actions")
 	ErrInvalidOperatorListLimit        = errors.New("invalid operator list limit")
 )
@@ -50,6 +52,8 @@ type Operator struct {
 	operations    ResourceOperationControlPlane
 	reset         func(context.Context) error
 	deployment    DeploymentControlPlane
+	workloads     WorkloadControlPlane
+	observability RuntimeObservability
 	applyProgress persistence.ApplyProgressStore
 }
 
@@ -68,6 +72,8 @@ type OperatorResponse struct {
 	ApplyProgresses []models.ApplyProgressRecord `json:"applyProgresses,omitempty"`
 	Recovery        *models.RecoveryRecord       `json:"recovery,omitempty"`
 	Recoveries      []models.RecoveryRecord      `json:"recoveries,omitempty"`
+	Workload        *WorkloadView                `json:"workload,omitempty"`
+	Observability   *RuntimeObservabilityReport  `json:"observability,omitempty"`
 	Plan            *deployment.DeploymentPlan   `json:"plan,omitempty"`
 	Resolution      *deployment.ResolvedDocument `json:"resolution,omitempty"`
 	Apply           *deployment.ApplyResult      `json:"apply,omitempty"`
@@ -85,15 +91,21 @@ func NewOperatorWithDeployment(resources ResourceControlPlane, blobs persistence
 }
 
 func newOperator(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error, deployment DeploymentControlPlane) (*Operator, error) {
+	return newOperatorWithRuntime(resources, blobs, operations, reset, deployment, nil, nil)
+}
+
+func newOperatorWithRuntime(resources ResourceControlPlane, blobs persistence.BlobStore, operations ResourceOperationControlPlane, reset func(context.Context) error, deployment DeploymentControlPlane, workloads WorkloadControlPlane, observability RuntimeObservability) (*Operator, error) {
 	if resources == nil || blobs == nil || operations == nil || reset == nil {
 		return nil, ErrInvalidOperator
 	}
 	return &Operator{
-		resources:  resources,
-		blobs:      blobs,
-		operations: operations,
-		reset:      reset,
-		deployment: deployment,
+		resources:     resources,
+		blobs:         blobs,
+		operations:    operations,
+		reset:         reset,
+		deployment:    deployment,
+		workloads:     workloads,
+		observability: observability,
 	}, nil
 }
 
@@ -148,7 +160,23 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 		}
 		return auditStore.Reset(ctx)
 	}
-	operator, err := NewOperator(resourceManager, blobStore, coordinator, reset)
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		return nil, err
+	}
+	provider := NewMemoryWorkloadProvider()
+	if err := registry.Register(models.ProviderMetadata{Namespace: "Ember.Compute", Type: "workloads", Version: "v1"}, provider); err != nil {
+		return nil, err
+	}
+	workloads, err := NewWorkloadManager(resourceManager, registry)
+	if err != nil {
+		return nil, err
+	}
+	observability, err := NewObservabilityManager(workloads, events.NewMetrics())
+	if err != nil {
+		return nil, err
+	}
+	operator, err := newOperatorWithRuntime(resourceManager, blobStore, coordinator, reset, nil, workloads, observability)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +192,39 @@ func (operator *Operator) CreateResource(ctx context.Context, principal Operator
 		return nil, ErrOperatorScopeDenied
 	}
 	return operator.resources.CreateResource(ctx, spec)
+}
+
+func (operator *Operator) CreateWorkload(ctx context.Context, principal OperatorPrincipal, spec models.ResourceSpec) (*WorkloadView, error) {
+	if operator.workloads == nil {
+		return nil, ErrOperatorWorkloadUnavailable
+	}
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	if principal.ScopeID == "" || spec.ParentID != principal.ScopeID {
+		return nil, ErrOperatorScopeDenied
+	}
+	return operator.workloads.CreateWorkload(ctx, principal.ScopeID, spec)
+}
+
+func (operator *Operator) RestartWorkload(ctx context.Context, principal OperatorPrincipal, resourceID string) (*WorkloadView, error) {
+	if operator.workloads == nil {
+		return nil, ErrOperatorWorkloadUnavailable
+	}
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	return operator.workloads.RestartWorkload(ctx, principal.ScopeID, resourceID)
+}
+
+func (operator *Operator) InspectWorkload(ctx context.Context, principal OperatorPrincipal, resourceID string, logLimit int) (*RuntimeObservabilityReport, error) {
+	if operator.observability == nil {
+		return nil, ErrOperatorWorkloadUnavailable
+	}
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	return operator.observability.InspectWorkload(ctx, principal.ScopeID, resourceID, logLimit)
 }
 
 func (operator *Operator) resourceLookupScope(principal OperatorPrincipal, resourceID string) string {

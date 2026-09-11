@@ -14,6 +14,68 @@ import (
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 )
 
+func TestHTTPWorkloadAcceptanceWalkthroughExposesHealthLogsRestartAndCorrelation(t *testing.T) {
+	operator, err := NewFileOperator(filepath.Join(t.TempDir(), "state"), 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	handler := NewHTTPHandler(operator)
+	root, err := operator.CreateResource(context.Background(), OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+
+	createBody, err := json.Marshal(map[string]any{
+		"name":         "api",
+		"provider":     models.ProviderMetadata{Namespace: "Ember.Compute", Type: "workloads", Version: "v1"},
+		"desiredState": models.ResourceStateReady,
+	})
+	if err != nil {
+		t.Fatalf("Marshal(workload create) error = %v", err)
+	}
+	created := operatorHTTPCall(t, handler, http.MethodPost, "/v1/workloads", root.ID, createBody)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("POST /v1/workloads status = %d, body = %s", created.Code, created.Body.String())
+	}
+	var createResponse struct {
+		Workload *WorkloadView `json:"workload"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &createResponse); err != nil {
+		t.Fatalf("decode workload create response error = %v", err)
+	}
+	if createResponse.Workload == nil || createResponse.Workload.Resource.ID == "" || createResponse.Workload.Status.ExecutionID == "" {
+		t.Fatalf("workload create response = %#v, want resource and execution correlation", createResponse)
+	}
+
+	restarted := operatorHTTPCall(t, handler, http.MethodPost, "/v1/workloads/"+createResponse.Workload.Resource.ID+"/restart", root.ID, nil)
+	if restarted.Code != http.StatusOK {
+		t.Fatalf("POST workload restart status = %d, body = %s", restarted.Code, restarted.Body.String())
+	}
+	var restartResponse struct {
+		Workload *WorkloadView `json:"workload"`
+	}
+	if err := json.Unmarshal(restarted.Body.Bytes(), &restartResponse); err != nil {
+		t.Fatalf("decode workload restart response error = %v", err)
+	}
+	if restartResponse.Workload == nil || restartResponse.Workload.Status.ExecutionID == createResponse.Workload.Status.ExecutionID {
+		t.Fatalf("workload restart response = %#v, want a new execution correlation", restartResponse)
+	}
+
+	inspected := operatorHTTPCall(t, handler, http.MethodGet, "/v1/workloads/"+createResponse.Workload.Resource.ID+"/observability?limit=10", root.ID, nil)
+	if inspected.Code != http.StatusOK {
+		t.Fatalf("GET workload observability status = %d, body = %s", inspected.Code, inspected.Body.String())
+	}
+	var inspectResponse struct {
+		Observability *RuntimeObservabilityReport `json:"observability"`
+	}
+	if err := json.Unmarshal(inspected.Body.Bytes(), &inspectResponse); err != nil {
+		t.Fatalf("decode workload observability response error = %v", err)
+	}
+	if inspectResponse.Observability == nil || inspectResponse.Observability.Status.Health != models.WorkloadHealthHealthy || inspectResponse.Observability.Status.Readiness != models.WorkloadReadinessReady || len(inspectResponse.Observability.Logs) != 1 || inspectResponse.Observability.Logs[0].ExecutionID != restartResponse.Workload.Status.ExecutionID {
+		t.Fatalf("workload observability response = %#v, want healthy ready bounded correlated logs", inspectResponse)
+	}
+}
+
 func TestHTTPResourceLifecycleUsesScopedOperatorContract(t *testing.T) {
 	operator := newTestOperator(t)
 	handler := NewHTTPHandler(operator)

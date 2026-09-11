@@ -44,6 +44,26 @@ func (request resourceCreateRequest) resourceSpec() models.ResourceSpec {
 	}
 }
 
+type workloadCreateRequest struct {
+	Name              string                         `json:"name"`
+	Provider          models.ProviderMetadata        `json:"provider"`
+	DesiredState      models.ResourceState           `json:"desiredState"`
+	WorkloadResources models.WorkloadResources       `json:"workloadResources"`
+	SecurityContext   models.WorkloadSecurityContext `json:"securityContext"`
+}
+
+func (request workloadCreateRequest) resourceSpec(scopeID string) models.ResourceSpec {
+	return models.ResourceSpec{
+		Type:              models.ResourceTypeWorkload,
+		Name:              request.Name,
+		ParentID:          scopeID,
+		Provider:          request.Provider,
+		DesiredState:      request.DesiredState,
+		WorkloadResources: request.WorkloadResources,
+		SecurityContext:   request.SecurityContext,
+	}
+}
+
 type resourceTagsRequest struct {
 	Tags          map[string]string `json:"tags"`
 	RequestID     string            `json:"requestId"`
@@ -66,6 +86,19 @@ type deploymentRequest struct {
 func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if handler.operator == nil {
 		writeOperatorError(writer, http.StatusInternalServerError, ErrInvalidOperator)
+		return
+	}
+	if request.URL.Path == "/v1/workloads" {
+		if request.Method != http.MethodPost {
+			writer.Header().Set("Allow", http.MethodPost)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+		handler.createWorkload(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/v1/workloads/") {
+		handler.workloadSubpath(writer, request)
 		return
 	}
 	if request.URL.Path == "/v1/resources" {
@@ -243,6 +276,75 @@ func (handler *operatorHTTPHandler) listResources(writer http.ResponseWriter, re
 		return
 	}
 	writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Resources: resources})
+}
+
+func (handler *operatorHTTPHandler) createWorkload(writer http.ResponseWriter, request *http.Request) {
+	var body workloadCreateRequest
+	if err := decodeOperatorJSON(writer, request, &body); err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	workload, err := handler.operator.CreateWorkload(request.Context(), operatorPrincipal(request), body.resourceSpec(request.Header.Get("X-Ember-Scope")))
+	if err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writeOperatorJSON(writer, http.StatusCreated, &OperatorResponse{Workload: workload})
+}
+
+func workloadSubpathFromPath(path string) (string, string, error) {
+	rest := strings.TrimPrefix(path, "/v1/workloads/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", errors.New("invalid workload path")
+	}
+	resourceID, err := url.PathUnescape(parts[0])
+	if err != nil || resourceID == "" {
+		return "", "", errors.New("invalid workload path")
+	}
+	return resourceID, parts[1], nil
+}
+
+func (handler *operatorHTTPHandler) workloadSubpath(writer http.ResponseWriter, request *http.Request) {
+	resourceID, suffix, err := workloadSubpathFromPath(request.URL.Path)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	principal := operatorPrincipal(request)
+	switch suffix {
+	case "restart":
+		if request.Method != http.MethodPost {
+			writer.Header().Set("Allow", http.MethodPost)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+		workload, err := handler.operator.RestartWorkload(request.Context(), principal, resourceID)
+		if err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Workload: workload})
+	case "observability":
+		if request.Method != http.MethodGet {
+			writer.Header().Set("Allow", http.MethodGet)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+		limit, err := queryLimit(request, MaxObservabilityLogLimit)
+		if err != nil {
+			writeOperatorError(writer, http.StatusBadRequest, err)
+			return
+		}
+		report, err := handler.operator.InspectWorkload(request.Context(), principal, resourceID, limit)
+		if err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Observability: report})
+	default:
+		http.NotFound(writer, request)
+	}
 }
 
 func resourceIDFromPath(path string) (string, error) {
@@ -713,16 +815,16 @@ func requireHTTPConfirmation(request *http.Request) error {
 }
 
 func operatorErrorStatus(err error) int {
-	if errors.Is(err, ErrOperatorScopeDenied) {
+	if errors.Is(err, ErrOperatorScopeDenied) || errors.Is(err, ErrWorkloadScopeDenied) {
 		return http.StatusForbidden
 	}
-	if errors.Is(err, persistence.ErrResourceNotFound) || errors.Is(err, persistence.ErrOperationNotFound) || errors.Is(err, persistence.ErrBlobObjectNotFound) || errors.Is(err, persistence.ErrApplyProgressNotFound) || errors.Is(err, persistence.ErrRecoveryNotFound) {
+	if errors.Is(err, persistence.ErrResourceNotFound) || errors.Is(err, persistence.ErrOperationNotFound) || errors.Is(err, persistence.ErrBlobObjectNotFound) || errors.Is(err, persistence.ErrApplyProgressNotFound) || errors.Is(err, persistence.ErrRecoveryNotFound) || errors.Is(err, ErrWorkloadNotFound) || errors.Is(err, ErrWorkloadProviderNotFound) {
 		return http.StatusNotFound
 	}
 	if errors.Is(err, persistence.ErrResourceLockConflict) || errors.Is(err, persistence.ErrResourceLockNotHeld) || errors.Is(err, persistence.ErrResourceLockNotOwner) || errors.Is(err, persistence.ErrResourceLocked) || errors.Is(err, persistence.ErrResourceHasDependents) || errors.Is(err, persistence.ErrOperationRequestConflict) || errors.Is(err, persistence.ErrRecoveryRequestConflict) || errors.Is(err, deployment.ErrDestructiveApprovalRequired) || errors.Is(err, ErrDestructiveConfirmationRequired) {
 		return http.StatusConflict
 	}
-	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, ErrInvalidOperatorListLimit) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) || errors.Is(err, persistence.ErrInvalidBlobListLimit) || errors.Is(err, persistence.ErrInvalidApplyProgressListLimit) || errors.Is(err, persistence.ErrInvalidRecoveryListLimit) || errors.Is(err, deployment.ErrMalformedDocument) || errors.Is(err, deployment.ErrDocumentTooLarge) || errors.Is(err, deployment.ErrInvalidDocument) || errors.Is(err, deployment.ErrInvalidResolution) || errors.Is(err, deployment.ErrInvalidApplyRequest) || errors.Is(err, deployment.ErrApplyDependency) || errors.Is(err, deployment.ErrInvalidRecoveryRequest) || errors.Is(err, deployment.ErrUnsupportedRecoveryFailure) || errors.Is(err, deployment.ErrRecoveryApplyNotReady) {
+	if errors.Is(err, ErrInvalidOperator) || errors.Is(err, ErrInvalidOperatorPrincipal) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, ErrInvalidOperatorListLimit) || errors.Is(err, ErrInvalidWorkloadSpec) || errors.Is(err, ErrInvalidWorkloadLogLimit) || errors.Is(err, ErrInvalidObservabilityLogLimit) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, models.ErrInvalidResourceLock) || errors.Is(err, models.ErrInvalidBlobObject) || errors.Is(err, models.ErrInvalidBlobBucketID) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, persistence.ErrInvalidResourceListLimit) || errors.Is(err, persistence.ErrInvalidOperationListLimit) || errors.Is(err, persistence.ErrInvalidAuditListLimit) || errors.Is(err, persistence.ErrInvalidBlobRange) || errors.Is(err, persistence.ErrInvalidBlobListLimit) || errors.Is(err, persistence.ErrInvalidApplyProgressListLimit) || errors.Is(err, persistence.ErrInvalidRecoveryListLimit) || errors.Is(err, deployment.ErrMalformedDocument) || errors.Is(err, deployment.ErrDocumentTooLarge) || errors.Is(err, deployment.ErrInvalidDocument) || errors.Is(err, deployment.ErrInvalidResolution) || errors.Is(err, deployment.ErrInvalidApplyRequest) || errors.Is(err, deployment.ErrApplyDependency) || errors.Is(err, deployment.ErrInvalidRecoveryRequest) || errors.Is(err, deployment.ErrUnsupportedRecoveryFailure) || errors.Is(err, deployment.ErrRecoveryApplyNotReady) {
 		return http.StatusBadRequest
 	}
 	if errors.Is(err, persistence.ErrBlobObjectTooLarge) || errors.Is(err, persistence.ErrBlobQuotaExceeded) {
