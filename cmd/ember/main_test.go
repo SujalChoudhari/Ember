@@ -93,6 +93,56 @@ func TestRunSupportsWorkloadHealthLogsRecoveryAndConfirmationJourney(t *testing.
 	}
 }
 
+func TestRunSupportsWorkloadVolumeAndLimitJourney(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	var stdout, stderr bytes.Buffer
+	call := func(args ...string) ember.OperatorResponse {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := run(append([]string{"--state-dir", stateDir}, args...), &stdout, &stderr); code != 0 {
+			t.Fatalf("run(%v) code = %d, stderr = %q", args, code, stderr.String())
+		}
+		var response ember.OperatorResponse
+		if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+			t.Fatalf("decode %v output %q error = %v", args, stdout.String(), err)
+		}
+		return response
+	}
+
+	group := call("resource", "create", "--type", "group", "--name", "platform")
+	workload := call("workload", "create", "--scope", group.Resource.ID, "--name", "api", "--provider-namespace", "Ember.Compute", "--provider-type", "workloads", "--provider-version", "v1", "--desired-state", "ready")
+	if workload.Workload == nil || workload.Workload.Status.ExecutionID == "" {
+		t.Fatalf("workload create = %#v, want execution correlation", workload)
+	}
+
+	attached := call("workload", "volume", "attach", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID, "--name", "cache", "--max-bytes", "1024")
+	if len(attached.Volumes) != 1 || attached.Volumes[0].WorkloadID != workload.Workload.Resource.ID || attached.Volumes[0].Name != "cache" {
+		t.Fatalf("volume attach = %#v, want bounded owned volume", attached)
+	}
+	listed := call("workload", "volume", "list", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID, "--limit", "10")
+	if len(listed.Volumes) != 1 || listed.Volumes[0].ID != attached.Volumes[0].ID {
+		t.Fatalf("volume list = %#v, want attached volume", listed)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--state-dir", stateDir, "workload", "volume", "cleanup", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "explicit confirmation") {
+		t.Fatalf("volume cleanup without confirmation code = %d, stderr = %q, want explicit confirmation", code, stderr.String())
+	}
+	call("workload", "volume", "cleanup", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID, "--confirm")
+	listed = call("workload", "volume", "list", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID, "--limit", "10")
+	if len(listed.Volumes) != 0 {
+		t.Fatalf("volume list after cleanup = %#v, want no owned volume residue", listed)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--state-dir", stateDir, "workload", "create", "--scope", group.Resource.ID, "--name", "oversized", "--provider-namespace", "Ember.Compute", "--provider-type", "workloads", "--provider-version", "v1", "--cpu-millis", "64001"}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "invalid workload spec") {
+		t.Fatalf("over-bound workload code = %d, stderr = %q, want deterministic limit error", code, stderr.String())
+	}
+}
+
 func TestRunSupportsDeploymentInspectionJourney(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	document := `{"version":"v1","resources":[{"type":"group","name":"platform","desiredState":"ready"}]}`

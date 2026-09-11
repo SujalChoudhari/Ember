@@ -83,6 +83,7 @@ type OperatorResponse struct {
 	Endpoint        *models.NetworkEndpoint      `json:"endpoint,omitempty"`
 	Endpoints       []models.NetworkEndpoint     `json:"endpoints,omitempty"`
 	Observability   *RuntimeObservabilityReport  `json:"observability,omitempty"`
+	Volumes         []models.WorkloadVolume      `json:"volumes,omitempty"`
 	Plan            *deployment.DeploymentPlan   `json:"plan,omitempty"`
 	Resolution      *deployment.ResolvedDocument `json:"resolution,omitempty"`
 	Apply           *deployment.ApplyResult      `json:"apply,omitempty"`
@@ -284,6 +285,45 @@ func (operator *Operator) InspectWorkload(ctx context.Context, principal Operato
 		return nil, err
 	}
 	return operator.observability.InspectWorkload(ctx, principal.ScopeID, resourceID, logLimit)
+}
+
+func (operator *Operator) AttachWorkloadVolume(ctx context.Context, principal OperatorPrincipal, resourceID, name string, maxBytes int64) (*models.WorkloadVolume, error) {
+	if operator.workloads == nil {
+		return nil, ErrOperatorWorkloadUnavailable
+	}
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	if principal.ScopeID == "" {
+		return nil, ErrOperatorScopeDenied
+	}
+	return operator.workloads.AttachWorkloadVolume(ctx, principal.ScopeID, resourceID, name, maxBytes)
+}
+
+func (operator *Operator) ListWorkloadVolumes(ctx context.Context, principal OperatorPrincipal, resourceID string, limit int) ([]models.WorkloadVolume, error) {
+	if operator.workloads == nil {
+		return nil, ErrOperatorWorkloadUnavailable
+	}
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	if principal.ScopeID == "" {
+		return nil, ErrOperatorScopeDenied
+	}
+	return operator.workloads.ListWorkloadVolumes(ctx, principal.ScopeID, resourceID, limit)
+}
+
+func (operator *Operator) CleanupWorkloadVolumes(ctx context.Context, principal OperatorPrincipal, resourceID string) error {
+	if operator.workloads == nil {
+		return ErrOperatorWorkloadUnavailable
+	}
+	if err := principal.validate(); err != nil {
+		return err
+	}
+	if principal.ScopeID == "" {
+		return ErrOperatorScopeDenied
+	}
+	return operator.workloads.CleanupWorkloadVolumes(ctx, principal.ScopeID, resourceID)
 }
 
 func (operator *Operator) networkScope(principal OperatorPrincipal) (string, error) {

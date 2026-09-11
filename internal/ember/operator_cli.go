@@ -119,6 +119,8 @@ func runCLIWorkload(ctx context.Context, operator *Operator, args []string, outp
 		return runCLIRestartWorkload(ctx, operator, args[1:], output)
 	case "delete":
 		return runCLIDeleteWorkload(ctx, operator, args[1:], output)
+	case "volume":
+		return runCLIWorkloadVolume(ctx, operator, args[1:], output)
 	default:
 		return ErrInvalidCLIRequest
 	}
@@ -228,6 +230,58 @@ func runCLIDeleteWorkload(ctx context.Context, operator *Operator, args []string
 		return err
 	}
 	return writeCLIResponse(output, &OperatorResponse{})
+}
+
+func runCLIWorkloadVolume(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	if len(args) < 1 {
+		return ErrInvalidCLIRequest
+	}
+	switch args[0] {
+	case "attach":
+		set := newCLIFlagSet("workload volume attach")
+		scopeID := set.String("scope", "", "operator scope")
+		resourceID := set.String("id", "", "workload resource ID")
+		name := set.String("name", "", "volume name")
+		maxBytes := set.Int64("max-bytes", 0, "maximum volume bytes")
+		if err := set.Parse(args[1:]); err != nil || requireNoCLIArgs(set) != nil {
+			return ErrInvalidCLIRequest
+		}
+		volume, err := operator.AttachWorkloadVolume(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, *name, *maxBytes)
+		if err != nil {
+			return err
+		}
+		return writeCLIResponse(output, &OperatorResponse{Volumes: []models.WorkloadVolume{*volume}})
+	case "list":
+		set := newCLIFlagSet("workload volume list")
+		scopeID := set.String("scope", "", "operator scope")
+		resourceID := set.String("id", "", "workload resource ID")
+		limit := set.Int("limit", MaxWorkloadVolumeRecords, "maximum volumes")
+		if err := set.Parse(args[1:]); err != nil || requireNoCLIArgs(set) != nil {
+			return ErrInvalidCLIRequest
+		}
+		volumes, err := operator.ListWorkloadVolumes(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, *limit)
+		if err != nil {
+			return err
+		}
+		return writeCLIResponse(output, &OperatorResponse{Volumes: volumes})
+	case "cleanup":
+		set := newCLIFlagSet("workload volume cleanup")
+		scopeID := set.String("scope", "", "operator scope")
+		resourceID := set.String("id", "", "workload resource ID")
+		confirm := set.Bool("confirm", false, "confirm volume cleanup")
+		if err := set.Parse(args[1:]); err != nil || requireNoCLIArgs(set) != nil {
+			return ErrInvalidCLIRequest
+		}
+		if !*confirm {
+			return ErrDestructiveConfirmationRequired
+		}
+		if err := operator.CleanupWorkloadVolumes(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID); err != nil {
+			return err
+		}
+		return writeCLIResponse(output, &OperatorResponse{})
+	default:
+		return ErrInvalidCLIRequest
+	}
 }
 
 func runCLIDeployment(ctx context.Context, operator *Operator, args []string, output io.Writer) error {

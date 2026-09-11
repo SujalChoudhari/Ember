@@ -978,6 +978,11 @@ func (provider *MemoryWorkloadProvider) AttachVolume(ctx context.Context, resour
 		return models.WorkloadVolume{}, errProviderInvalidVolume
 	}
 	provider.volumes[resource.ID] = append(volumes, volume)
+	if err := provider.persistLocked(); err != nil {
+		provider.volumes[resource.ID] = volumes
+		provider.nextVolumeID--
+		return models.WorkloadVolume{}, err
+	}
 	return volume, nil
 }
 
@@ -1017,7 +1022,14 @@ func (provider *MemoryWorkloadProvider) CleanupVolumes(ctx context.Context, reso
 	if _, exists := provider.workloads[resource.ID]; !exists {
 		return errProviderNotFound
 	}
+	previousVolumes, hadVolumes := provider.volumes[resource.ID]
 	delete(provider.volumes, resource.ID)
+	if err := provider.persistLocked(); err != nil {
+		if hadVolumes {
+			provider.volumes[resource.ID] = previousVolumes
+		}
+		return err
+	}
 	return nil
 }
 
