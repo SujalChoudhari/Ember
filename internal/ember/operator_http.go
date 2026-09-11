@@ -113,7 +113,12 @@ func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, reques
 		return
 	}
 	if strings.HasPrefix(request.URL.Path, "/v1/workloads/") {
-		handler.workloadSubpath(writer, request)
+		rest := strings.TrimPrefix(request.URL.Path, "/v1/workloads/")
+		if rest != "" && !strings.Contains(rest, "/") {
+			handler.deleteWorkload(writer, request)
+		} else {
+			handler.workloadSubpath(writer, request)
+		}
 		return
 	}
 	if request.URL.Path == "/v1/networks" {
@@ -574,6 +579,40 @@ func (handler *operatorHTTPHandler) createWorkload(writer http.ResponseWriter, r
 		return
 	}
 	writeOperatorJSON(writer, http.StatusCreated, &OperatorResponse{Workload: workload})
+}
+
+func workloadIDFromPath(path string) (string, error) {
+	encoded := strings.TrimPrefix(path, "/v1/workloads/")
+	if encoded == "" || strings.Contains(encoded, "/") {
+		return "", errors.New("invalid workload path")
+	}
+	resourceID, err := url.PathUnescape(encoded)
+	if err != nil || resourceID == "" {
+		return "", errors.New("invalid workload path")
+	}
+	return resourceID, nil
+}
+
+func (handler *operatorHTTPHandler) deleteWorkload(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodDelete {
+		writer.Header().Set("Allow", http.MethodDelete)
+		writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	if err := requireHTTPConfirmation(request); err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	resourceID, err := workloadIDFromPath(request.URL.Path)
+	if err != nil {
+		writeOperatorError(writer, http.StatusBadRequest, err)
+		return
+	}
+	if err := handler.operator.DeleteWorkload(request.Context(), operatorPrincipal(request), resourceID); err != nil {
+		writeOperatorError(writer, operatorErrorStatus(err), err)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func workloadSubpathFromPath(path string) (string, string, error) {

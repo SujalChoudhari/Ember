@@ -174,6 +174,7 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	if err != nil {
 		return nil, err
 	}
+	var provider *MemoryWorkloadProvider
 	reset := func(ctx context.Context) error {
 		if err := networkStore.Reset(ctx); err != nil {
 			return err
@@ -187,13 +188,19 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 		if err := operationStore.Reset(ctx); err != nil {
 			return err
 		}
+		if err := provider.Reset(ctx); err != nil {
+			return err
+		}
 		return auditStore.Reset(ctx)
 	}
 	registry, err := NewWorkloadProviderRegistry()
 	if err != nil {
 		return nil, err
 	}
-	provider := NewMemoryWorkloadProvider()
+	provider, err = NewMemoryWorkloadProviderWithState(filepath.Join(root, "workloads.json"))
+	if err != nil {
+		return nil, err
+	}
 	if err := registry.Register(models.ProviderMetadata{Namespace: "Ember.Compute", Type: "workloads", Version: "v1"}, provider); err != nil {
 		return nil, err
 	}
@@ -234,6 +241,16 @@ func (operator *Operator) CreateWorkload(ctx context.Context, principal Operator
 		return nil, ErrOperatorScopeDenied
 	}
 	return operator.workloads.CreateWorkload(ctx, principal.ScopeID, spec)
+}
+
+func (operator *Operator) GetWorkload(ctx context.Context, principal OperatorPrincipal, resourceID string) (*WorkloadView, error) {
+	if operator.workloads == nil {
+		return nil, ErrOperatorWorkloadUnavailable
+	}
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	return operator.workloads.GetWorkload(ctx, principal.ScopeID, resourceID)
 }
 
 func (operator *Operator) RestartWorkload(ctx context.Context, principal OperatorPrincipal, resourceID string) (*WorkloadView, error) {

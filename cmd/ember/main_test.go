@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SujalChoudhari/Ember/internal/ember"
@@ -43,6 +44,52 @@ func TestRunExecutesSharedCLIAgainstFileOperator(t *testing.T) {
 	}
 	if fetched.Resource == nil || fetched.Resource.ID != created.Resource.ID {
 		t.Fatalf("get output = %#v, want resource %q", fetched, created.Resource.ID)
+	}
+}
+
+func TestRunSupportsWorkloadHealthLogsRecoveryAndConfirmationJourney(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	var stdout, stderr bytes.Buffer
+	call := func(args ...string) ember.OperatorResponse {
+		t.Helper()
+		stdout.Reset()
+		stderr.Reset()
+		if code := run(append([]string{"--state-dir", stateDir}, args...), &stdout, &stderr); code != 0 {
+			t.Fatalf("run(%v) code = %d, stderr = %q", args, code, stderr.String())
+		}
+		var response ember.OperatorResponse
+		if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+			t.Fatalf("decode %v output %q error = %v", args, stdout.String(), err)
+		}
+		return response
+	}
+
+	group := call("resource", "create", "--type", "group", "--name", "platform")
+	workload := call("workload", "create", "--scope", group.Resource.ID, "--name", "api", "--provider-namespace", "Ember.Compute", "--provider-type", "workloads", "--provider-version", "v1", "--desired-state", "ready")
+	if workload.Workload == nil || workload.Workload.Status.Health != "healthy" || workload.Workload.Status.Readiness != "ready" {
+		t.Fatalf("workload create = %#v, want healthy ready workload", workload)
+	}
+
+	inspected := call("workload", "inspect", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID, "--limit", "10")
+	if inspected.Observability == nil || inspected.Observability.Status.Health != "healthy" || inspected.Observability.Status.Readiness != "ready" {
+		t.Fatalf("workload inspection = %#v, want bounded health report", inspected)
+	}
+	restarted := call("workload", "restart", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID)
+	if restarted.Workload == nil || restarted.Workload.Status.ExecutionID == workload.Workload.Status.ExecutionID {
+		t.Fatalf("workload restart = %#v, want new execution correlation", restarted)
+	}
+	inspected = call("workload", "inspect", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID, "--limit", "1")
+	if inspected.Observability == nil || len(inspected.Observability.Logs) != 1 || inspected.Observability.Logs[0].ExecutionID != restarted.Workload.Status.ExecutionID {
+		t.Fatalf("workload logs = %#v, want one bounded restart log", inspected)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"--state-dir", stateDir, "workload", "delete", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "explicit confirmation") {
+		t.Fatalf("workload delete without confirmation code = %d, stderr = %q, want explicit confirmation", code, stderr.String())
+	}
+	if code := run([]string{"--state-dir", stateDir, "workload", "delete", "--scope", group.Resource.ID, "--id", workload.Workload.Resource.ID, "--confirm"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("confirmed workload delete code = %d, stderr = %q", code, stderr.String())
 	}
 }
 

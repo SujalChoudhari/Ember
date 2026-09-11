@@ -22,7 +22,7 @@ umask 077
 "$BINARY" --state-dir "$STATE_DIR" blob get --scope resource-00000001 --bucket resource-00000002 --key greeting >/dev/null
 "$BINARY" --state-dir "$STATE_DIR" reset --confirm >/dev/null
 
-for path in resources.json operations.json audit.json apply-progress.json blobs/metadata.json blobs/objects; do
+for path in resources.json workloads.json operations.json audit.json apply-progress.json blobs/metadata.json blobs/objects; do
   if [ -e "$STATE_DIR/$path" ]; then
     printf '%s\n' "reset left owned residue: $STATE_DIR/$path" >&2
     exit 1

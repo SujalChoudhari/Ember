@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
+	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
 
@@ -282,6 +283,45 @@ func TestCLIExposesDeploymentPlanAndApplyLifecycle(t *testing.T) {
 	resources := runOperatorCLI(t, operator, "resource", "list", "--limit", "10")
 	if len(resources.Resources) != 1 || resources.Resources[0].Spec.Tags["tier"] != "test" || resources.Resources[0].Spec.Tags["password"] == "secret-value" {
 		t.Fatalf("CLI applied resources = %#v, want redacted resource state", resources)
+	}
+}
+
+func TestCLIExposesSafeWorkloadInspectionJourney(t *testing.T) {
+	stateDir := t.TempDir()
+	operator, err := NewFileOperator(stateDir, 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	group := runOperatorCLI(t, operator, "resource", "create", "--type", "group", "--name", "platform").Resource
+
+	workload := runOperatorCLI(t, operator, "workload", "create", "--scope", group.ID, "--name", "api", "--provider-namespace", "Ember.Compute", "--provider-type", "workloads", "--provider-version", "v1", "--desired-state", "ready")
+	if workload.Workload == nil || workload.Workload.Resource.ID == "" || workload.Workload.Status.Health != models.WorkloadHealthHealthy || workload.Workload.Status.Readiness != models.WorkloadReadinessReady {
+		t.Fatalf("CLI workload create = %#v, want healthy ready workload", workload)
+	}
+
+	inspected := runOperatorCLI(t, operator, "workload", "inspect", "--scope", group.ID, "--id", workload.Workload.Resource.ID, "--limit", "10")
+	if inspected.Observability == nil || inspected.Observability.Status.Health != models.WorkloadHealthHealthy || inspected.Observability.Status.Readiness != models.WorkloadReadinessReady || len(inspected.Observability.Logs) != 0 {
+		t.Fatalf("CLI workload inspection = %#v, want bounded healthy report", inspected)
+	}
+
+	restarted := runOperatorCLI(t, operator, "workload", "restart", "--scope", group.ID, "--id", workload.Workload.Resource.ID)
+	if restarted.Workload == nil || restarted.Workload.Status.ExecutionID == workload.Workload.Status.ExecutionID {
+		t.Fatalf("CLI workload restart = %#v, want new execution correlation", restarted)
+	}
+	operator, err = NewFileOperator(stateDir, 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator(reopen) error = %v", err)
+	}
+	inspected = runOperatorCLI(t, operator, "workload", "inspect", "--scope", group.ID, "--id", workload.Workload.Resource.ID, "--limit", "1")
+	if inspected.Observability == nil || len(inspected.Observability.Logs) != 1 || inspected.Observability.Logs[0].ExecutionID != restarted.Workload.Status.ExecutionID {
+		t.Fatalf("CLI workload logs = %#v, want one bounded restart log", inspected)
+	}
+
+	if _, err := runOperatorCLIResult(t, operator, "workload", "delete", "--scope", group.ID, "--id", workload.Workload.Resource.ID); !errors.Is(err, ErrDestructiveConfirmationRequired) {
+		t.Fatalf("CLI workload delete without confirmation error = %v, want confirmation error", err)
+	}
+	if _, err := runOperatorCLIResult(t, operator, "workload", "delete", "--scope", group.ID, "--id", workload.Workload.Resource.ID, "--confirm"); err != nil {
+		t.Fatalf("CLI confirmed workload delete error = %v", err)
 	}
 }
 

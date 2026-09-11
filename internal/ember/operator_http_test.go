@@ -74,6 +74,14 @@ func TestHTTPWorkloadAcceptanceWalkthroughExposesHealthLogsRestartAndCorrelation
 	if inspectResponse.Observability == nil || inspectResponse.Observability.Status.Health != models.WorkloadHealthHealthy || inspectResponse.Observability.Status.Readiness != models.WorkloadReadinessReady || len(inspectResponse.Observability.Logs) != 1 || inspectResponse.Observability.Logs[0].ExecutionID != restartResponse.Workload.Status.ExecutionID {
 		t.Fatalf("workload observability response = %#v, want healthy ready bounded correlated logs", inspectResponse)
 	}
+	withoutConfirmation := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/workloads/"+createResponse.Workload.Resource.ID, root.ID, nil)
+	if withoutConfirmation.Code != http.StatusConflict {
+		t.Fatalf("DELETE workload without confirmation status = %d, body = %s", withoutConfirmation.Code, withoutConfirmation.Body.String())
+	}
+	confirmed := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/workloads/"+createResponse.Workload.Resource.ID+"?confirm=true", root.ID, nil)
+	if confirmed.Code != http.StatusNoContent {
+		t.Fatalf("DELETE workload with confirmation status = %d, body = %s", confirmed.Code, confirmed.Body.String())
+	}
 }
 
 func TestHTTPExposesScopedNetworkLifecycle(t *testing.T) {
