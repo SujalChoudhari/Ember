@@ -196,7 +196,7 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	if err := registry.Register(models.ProviderMetadata{Namespace: "Ember.Compute", Type: "workloads", Version: "v1"}, provider); err != nil {
 		return nil, err
 	}
-	workloads, err := NewWorkloadManager(resourceManager, registry)
+	workloads, err := NewWorkloadManagerWithNetwork(resourceManager, registry, networkManager)
 	if err != nil {
 		return nil, err
 	}
@@ -243,6 +243,19 @@ func (operator *Operator) RestartWorkload(ctx context.Context, principal Operato
 		return nil, err
 	}
 	return operator.workloads.RestartWorkload(ctx, principal.ScopeID, resourceID)
+}
+
+func (operator *Operator) DeleteWorkload(ctx context.Context, principal OperatorPrincipal, resourceID string) error {
+	if operator.workloads == nil {
+		return ErrOperatorWorkloadUnavailable
+	}
+	if err := principal.validate(); err != nil {
+		return err
+	}
+	if principal.ScopeID == "" {
+		return ErrOperatorScopeDenied
+	}
+	return operator.workloads.DeleteWorkload(ctx, principal.ScopeID, resourceID)
 }
 
 func (operator *Operator) InspectWorkload(ctx context.Context, principal OperatorPrincipal, resourceID string, logLimit int) (*RuntimeObservabilityReport, error) {
@@ -304,6 +317,11 @@ func (operator *Operator) AllocateNetworkPort(ctx context.Context, principal Ope
 	scopeID, err := operator.networkScope(principal)
 	if err != nil {
 		return nil, err
+	}
+	if operator.workloads != nil {
+		if _, err := operator.workloads.GetWorkload(ctx, scopeID, workloadID); err != nil {
+			return nil, err
+		}
 	}
 	return operator.networks.AllocatePort(ctx, scopeID, networkID, workloadID, number, protocol)
 }

@@ -82,8 +82,23 @@ func TestHTTPExposesScopedNetworkLifecycle(t *testing.T) {
 		t.Fatalf("NewFileOperator() error = %v", err)
 	}
 	handler := NewHTTPHandler(operator)
+	root, err := operator.CreateResource(context.Background(), OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	workload, err := operator.CreateWorkload(context.Background(), OperatorPrincipal{ScopeID: root.ID}, models.ResourceSpec{
+		Type:         models.ResourceTypeWorkload,
+		Name:         "api",
+		ParentID:     root.ID,
+		Provider:     models.ProviderMetadata{Namespace: "Ember.Compute", Type: "workloads", Version: "v1"},
+		DesiredState: models.ResourceStateReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+	scopeID := root.ID
 
-	createNetwork := operatorHTTPCall(t, handler, http.MethodPost, "/v1/networks", "scope-a", []byte(`{"name":"frontend"}`))
+	createNetwork := operatorHTTPCall(t, handler, http.MethodPost, "/v1/networks", scopeID, []byte(`{"name":"frontend"}`))
 	if createNetwork.Code != http.StatusCreated {
 		t.Fatalf("POST /v1/networks status = %d, body = %s", createNetwork.Code, createNetwork.Body.String())
 	}
@@ -98,12 +113,12 @@ func TestHTTPExposesScopedNetworkLifecycle(t *testing.T) {
 	}
 
 	networkID := networkResponse.Network.ID
-	listedNetworks := operatorHTTPCall(t, handler, http.MethodGet, "/v1/networks?limit=10", "scope-a", nil)
+	listedNetworks := operatorHTTPCall(t, handler, http.MethodGet, "/v1/networks?limit=10", scopeID, nil)
 	if listedNetworks.Code != http.StatusOK || !strings.Contains(listedNetworks.Body.String(), networkID) {
 		t.Fatalf("GET /v1/networks response = %d %s, want scoped network", listedNetworks.Code, listedNetworks.Body.String())
 	}
 
-	port := operatorHTTPCall(t, handler, http.MethodPost, "/v1/networks/"+networkID+"/ports", "scope-a", []byte(`{"workloadId":"workload-a","number":8080,"protocol":"tcp"}`))
+	port := operatorHTTPCall(t, handler, http.MethodPost, "/v1/networks/"+networkID+"/ports", scopeID, []byte(`{"workloadId":"`+workload.Resource.ID+`","number":8080,"protocol":"tcp"}`))
 	if port.Code != http.StatusCreated {
 		t.Fatalf("POST network port status = %d, body = %s", port.Code, port.Body.String())
 	}
@@ -116,17 +131,17 @@ func TestHTTPExposesScopedNetworkLifecycle(t *testing.T) {
 	if portResponse.Port == nil {
 		t.Fatalf("port response = %#v, want port", portResponse)
 	}
-	if listedPorts := operatorHTTPCall(t, handler, http.MethodGet, "/v1/networks/"+networkID+"/ports?limit=10", "scope-a", nil); listedPorts.Code != http.StatusOK || !strings.Contains(listedPorts.Body.String(), portResponse.Port.ID) {
+	if listedPorts := operatorHTTPCall(t, handler, http.MethodGet, "/v1/networks/"+networkID+"/ports?limit=10", scopeID, nil); listedPorts.Code != http.StatusOK || !strings.Contains(listedPorts.Body.String(), portResponse.Port.ID) {
 		t.Fatalf("GET network ports response = %d %s, want scoped port", listedPorts.Code, listedPorts.Body.String())
 	}
-	if inspectedNetwork := operatorHTTPCall(t, handler, http.MethodGet, "/v1/networks/"+networkID, "scope-a", nil); inspectedNetwork.Code != http.StatusOK || !strings.Contains(inspectedNetwork.Body.String(), networkID) {
+	if inspectedNetwork := operatorHTTPCall(t, handler, http.MethodGet, "/v1/networks/"+networkID, scopeID, nil); inspectedNetwork.Code != http.StatusOK || !strings.Contains(inspectedNetwork.Body.String(), networkID) {
 		t.Fatalf("GET network response = %d %s, want network", inspectedNetwork.Code, inspectedNetwork.Body.String())
 	}
-	if inspectedPort := operatorHTTPCall(t, handler, http.MethodGet, "/v1/network-ports/"+portResponse.Port.ID, "scope-a", nil); inspectedPort.Code != http.StatusOK || !strings.Contains(inspectedPort.Body.String(), portResponse.Port.ID) {
+	if inspectedPort := operatorHTTPCall(t, handler, http.MethodGet, "/v1/network-ports/"+portResponse.Port.ID, scopeID, nil); inspectedPort.Code != http.StatusOK || !strings.Contains(inspectedPort.Body.String(), portResponse.Port.ID) {
 		t.Fatalf("GET network port response = %d %s, want port", inspectedPort.Code, inspectedPort.Body.String())
 	}
 
-	endpoint := operatorHTTPCall(t, handler, http.MethodPost, "/v1/networks/"+networkID+"/endpoints", "scope-a", []byte(`{"portId":"`+portResponse.Port.ID+`","name":"api"}`))
+	endpoint := operatorHTTPCall(t, handler, http.MethodPost, "/v1/networks/"+networkID+"/endpoints", scopeID, []byte(`{"portId":"`+portResponse.Port.ID+`","name":"api"}`))
 	if endpoint.Code != http.StatusCreated {
 		t.Fatalf("POST network endpoint status = %d, body = %s", endpoint.Code, endpoint.Body.String())
 	}
@@ -139,28 +154,28 @@ func TestHTTPExposesScopedNetworkLifecycle(t *testing.T) {
 	if endpointResponse.Endpoint == nil {
 		t.Fatalf("endpoint response = %#v, want endpoint", endpointResponse)
 	}
-	if listedEndpoints := operatorHTTPCall(t, handler, http.MethodGet, "/v1/networks/"+networkID+"/endpoints?limit=10", "scope-a", nil); listedEndpoints.Code != http.StatusOK || !strings.Contains(listedEndpoints.Body.String(), endpointResponse.Endpoint.ID) {
+	if listedEndpoints := operatorHTTPCall(t, handler, http.MethodGet, "/v1/networks/"+networkID+"/endpoints?limit=10", scopeID, nil); listedEndpoints.Code != http.StatusOK || !strings.Contains(listedEndpoints.Body.String(), endpointResponse.Endpoint.ID) {
 		t.Fatalf("GET network endpoints response = %d %s, want scoped endpoint", listedEndpoints.Code, listedEndpoints.Body.String())
 	}
-	if inspectedEndpoint := operatorHTTPCall(t, handler, http.MethodGet, "/v1/network-endpoints/"+endpointResponse.Endpoint.ID, "scope-a", nil); inspectedEndpoint.Code != http.StatusOK || !strings.Contains(inspectedEndpoint.Body.String(), endpointResponse.Endpoint.ID) {
+	if inspectedEndpoint := operatorHTTPCall(t, handler, http.MethodGet, "/v1/network-endpoints/"+endpointResponse.Endpoint.ID, scopeID, nil); inspectedEndpoint.Code != http.StatusOK || !strings.Contains(inspectedEndpoint.Body.String(), endpointResponse.Endpoint.ID) {
 		t.Fatalf("GET network endpoint response = %d %s, want endpoint", inspectedEndpoint.Code, inspectedEndpoint.Body.String())
 	}
 
-	foreign := operatorHTTPCall(t, handler, http.MethodGet, "/v1/network-endpoints/"+endpointResponse.Endpoint.ID, "scope-b", nil)
+	foreign := operatorHTTPCall(t, handler, http.MethodGet, "/v1/network-endpoints/"+endpointResponse.Endpoint.ID, "foreign-scope", nil)
 	if foreign.Code != http.StatusNotFound || strings.Contains(foreign.Body.String(), endpointResponse.Endpoint.Address) {
 		t.Fatalf("cross-scope endpoint response = %d %s, want redacted 404", foreign.Code, foreign.Body.String())
 	}
 
-	if deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/network-endpoints/"+endpointResponse.Endpoint.ID+"?confirm=true", "scope-a", nil); deleted.Code != http.StatusNoContent {
+	if deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/network-endpoints/"+endpointResponse.Endpoint.ID+"?confirm=true", scopeID, nil); deleted.Code != http.StatusNoContent {
 		t.Fatalf("DELETE network endpoint status = %d, body = %s", deleted.Code, deleted.Body.String())
 	}
-	if deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/network-endpoints/"+endpointResponse.Endpoint.ID+"?confirm=true", "scope-a", nil); deleted.Code != http.StatusNoContent {
+	if deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/network-endpoints/"+endpointResponse.Endpoint.ID+"?confirm=true", scopeID, nil); deleted.Code != http.StatusNoContent {
 		t.Fatalf("repeat DELETE network endpoint status = %d, body = %s", deleted.Code, deleted.Body.String())
 	}
-	if deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/network-ports/"+portResponse.Port.ID+"?confirm=true", "scope-a", nil); deleted.Code != http.StatusNoContent {
+	if deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/network-ports/"+portResponse.Port.ID+"?confirm=true", scopeID, nil); deleted.Code != http.StatusNoContent {
 		t.Fatalf("DELETE network port status = %d, body = %s", deleted.Code, deleted.Body.String())
 	}
-	if deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/networks/"+networkID+"?confirm=true", "scope-a", nil); deleted.Code != http.StatusNoContent {
+	if deleted := operatorHTTPCall(t, handler, http.MethodDelete, "/v1/networks/"+networkID+"?confirm=true", scopeID, nil); deleted.Code != http.StatusNoContent {
 		t.Fatalf("DELETE network status = %d, body = %s", deleted.Code, deleted.Body.String())
 	}
 }

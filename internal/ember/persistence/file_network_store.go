@@ -450,6 +450,52 @@ func (store *FileNetworkStore) DeletePort(ctx context.Context, scopeID, portID s
 	return nil
 }
 
+func (store *FileNetworkStore) DeletePortsForWorkload(ctx context.Context, scopeID, workloadID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateNetworkScope(scopeID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(workloadID) == "" || len(workloadID) > models.MaxNetworkWorkloadIDLen {
+		return ErrInvalidNetworkWorkloadID
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	removedPorts := make(map[string]models.NetworkPort)
+	for portID, port := range store.ports {
+		if port.ScopeID == scopeID && port.WorkloadID == workloadID {
+			removedPorts[portID] = port
+		}
+	}
+	if len(removedPorts) == 0 {
+		return nil
+	}
+	removedEndpoints := make(map[string]models.NetworkEndpoint)
+	for endpointID, endpoint := range store.endpoints {
+		if _, attached := removedPorts[endpoint.PortID]; attached {
+			removedEndpoints[endpointID] = endpoint
+		}
+	}
+	for portID := range removedPorts {
+		delete(store.ports, portID)
+	}
+	for endpointID := range removedEndpoints {
+		delete(store.endpoints, endpointID)
+	}
+	if err := store.saveLocked(); err != nil {
+		for portID, port := range removedPorts {
+			store.ports[portID] = port
+		}
+		for endpointID, endpoint := range removedEndpoints {
+			store.endpoints[endpointID] = endpoint
+		}
+		return err
+	}
+	return nil
+}
+
 func (store *FileNetworkStore) PublishEndpoint(ctx context.Context, scopeID, networkID, portID, name string) (*models.NetworkEndpoint, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

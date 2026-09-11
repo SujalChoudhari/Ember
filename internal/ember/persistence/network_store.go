@@ -19,6 +19,7 @@ var (
 	ErrDuplicateNetworkEndpoint    = errors.New("duplicate network endpoint")
 	ErrNetworkHasDependents        = errors.New("network has dependents")
 	ErrInvalidNetworkScope         = errors.New("invalid network scope")
+	ErrInvalidNetworkWorkloadID    = errors.New("invalid network workload id")
 	ErrInvalidNetworkListLimit     = errors.New("invalid network list limit")
 	ErrInvalidNetworkStorePath     = errors.New("invalid network store path")
 	ErrNetworkStoreCorrupt         = errors.New("corrupt network store")
@@ -37,6 +38,7 @@ type NetworkStore interface {
 	GetPort(ctx context.Context, scopeID, portID string) (*models.NetworkPort, error)
 	ListPorts(ctx context.Context, scopeID, networkID string, limit int) ([]models.NetworkPort, error)
 	DeletePort(ctx context.Context, scopeID, portID string) error
+	DeletePortsForWorkload(ctx context.Context, scopeID, workloadID string) error
 	PublishEndpoint(ctx context.Context, scopeID, networkID, portID, name string) (*models.NetworkEndpoint, error)
 	ResolveEndpoint(ctx context.Context, scopeID, endpointID string) (*models.NetworkEndpoint, error)
 	ListEndpoints(ctx context.Context, scopeID, networkID string, limit int) ([]models.NetworkEndpoint, error)
