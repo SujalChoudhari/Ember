@@ -62,6 +62,14 @@ func (provider *failingReconcileProvider) Update(ctx context.Context, resource m
 	return provider.MemoryWorkloadProvider.Update(ctx, resource)
 }
 
+type workloadProviderWithoutVolumeCleanup struct {
+	*MemoryWorkloadProvider
+}
+
+func (provider *workloadProviderWithoutVolumeCleanup) Delete(context.Context, models.Resource) error {
+	return nil
+}
+
 func TestWorkloadProviderPersistsObservedStateAfterReconciliation(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "resources.json")
@@ -805,6 +813,48 @@ func TestWorkloadProviderBoundaryScopesOwnedVolumeLifecycle(t *testing.T) {
 	}
 	if len(volumesB) != 1 || volumesB[0].ID != volumeB.ID {
 		t.Fatalf("ListWorkloadVolumes(unrelated workload) = %#v, want unrelated volume preserved", volumesB)
+	}
+}
+
+func TestWorkloadProviderDeleteCleansOwnedVolumesBeforeProviderDelete(t *testing.T) {
+	ctx := context.Background()
+	provider := &workloadProviderWithoutVolumeCleanup{MemoryWorkloadProvider: NewMemoryWorkloadProvider()}
+	metadata := workloadProviderMetadata("delete-cleanup-v1")
+	registry, err := NewWorkloadProviderRegistry()
+	if err != nil {
+		t.Fatalf("NewWorkloadProviderRegistry() error = %v", err)
+	}
+	if err := registry.Register(metadata, provider); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	resources, err := NewResourceManager(newWorkloadFileResourceStore(t))
+	if err != nil {
+		t.Fatalf("NewResourceManager() error = %v", err)
+	}
+	manager, err := NewWorkloadManager(resources, registry)
+	if err != nil {
+		t.Fatalf("NewWorkloadManager() error = %v", err)
+	}
+	root, err := resources.CreateResource(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+	workload, err := manager.CreateWorkload(ctx, root.ID, workloadResourceSpec(root.ID, "api", metadata))
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+	if _, err := manager.AttachWorkloadVolume(ctx, root.ID, workload.Resource.ID, "cache", 1024); err != nil {
+		t.Fatalf("AttachWorkloadVolume() error = %v", err)
+	}
+	if err := manager.DeleteWorkload(ctx, root.ID, workload.Resource.ID); err != nil {
+		t.Fatalf("DeleteWorkload() error = %v", err)
+	}
+	volumes, err := provider.ListVolumes(ctx, workload.Resource, MaxWorkloadVolumeRecords)
+	if err != nil {
+		t.Fatalf("provider ListVolumes(after delete) error = %v", err)
+	}
+	if len(volumes) != 0 {
+		t.Fatalf("provider volumes after workload delete = %#v, want no residue", volumes)
 	}
 }
 

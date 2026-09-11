@@ -76,6 +76,50 @@ func TestHTTPWorkloadAcceptanceWalkthroughExposesHealthLogsRestartAndCorrelation
 	}
 }
 
+func TestHTTPWorkloadSafetyFailuresUseStableStatuses(t *testing.T) {
+	operator, err := NewFileOperator(filepath.Join(t.TempDir(), "state"), 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	handler := NewHTTPHandler(operator)
+	root, err := operator.CreateResource(context.Background(), OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "compute"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+
+	create := func(body map[string]any) *httptest.ResponseRecorder {
+		t.Helper()
+		payload, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("Marshal(workload) error = %v", err)
+		}
+		return operatorHTTPCall(t, handler, http.MethodPost, "/v1/workloads", root.ID, payload)
+	}
+
+	overLimit := create(map[string]any{
+		"name":              "over-limit",
+		"provider":          models.ProviderMetadata{Namespace: "Ember.Compute", Type: "workloads", Version: "v1"},
+		"desiredState":      models.ResourceStateReady,
+		"workloadResources": models.WorkloadResources{CPUMillis: models.MaxWorkloadCPUMillis + 1},
+	})
+	if overLimit.Code != http.StatusBadRequest || overLimit.Body.String() != "{\"error\":\"invalid workload spec\"}\n" {
+		t.Fatalf("over-limit response = %d %q, want stable bad-request validation error", overLimit.Code, overLimit.Body.String())
+	}
+
+	privileged := create(map[string]any{
+		"name":            "privileged",
+		"provider":        models.ProviderMetadata{Namespace: "Ember.Compute", Type: "workloads", Version: "v1"},
+		"desiredState":    models.ResourceStateReady,
+		"securityContext": models.WorkloadSecurityContext{Privileged: true},
+	})
+	if privileged.Code != http.StatusForbidden || privileged.Body.String() != "{\"error\":\"workload privilege denied\"}\n" {
+		t.Fatalf("privileged response = %d %q, want stable forbidden error", privileged.Code, privileged.Body.String())
+	}
+	if got := operatorErrorStatus(ErrWorkloadResourceLimit); got != http.StatusBadRequest {
+		t.Fatalf("operatorErrorStatus(resource limit) = %d, want %d", got, http.StatusBadRequest)
+	}
+}
+
 func TestHTTPResourceLifecycleUsesScopedOperatorContract(t *testing.T) {
 	operator := newTestOperator(t)
 	handler := NewHTTPHandler(operator)

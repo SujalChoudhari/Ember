@@ -380,6 +380,11 @@ func (manager *WorkloadManager) DeleteWorkload(ctx context.Context, scopeID, res
 	if err != nil {
 		return err
 	}
+	if volumeProvider, ok := provider.(WorkloadVolumeProvider); ok {
+		if providerErr := volumeProvider.CleanupVolumes(ctx, *resource); providerErr != nil {
+			return mapWorkloadProviderError(providerErr)
+		}
+	}
 	if providerErr := provider.Delete(ctx, *resource); providerErr != nil {
 		return mapWorkloadProviderError(providerErr)
 	}
