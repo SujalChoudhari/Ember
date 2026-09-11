@@ -311,6 +311,37 @@ func (store *FileNetworkStore) ListNetworks(ctx context.Context, scopeID string,
 	return networks, nil
 }
 
+func (store *FileNetworkStore) DeleteNetwork(ctx context.Context, scopeID, networkID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateNetworkScope(scopeID); err != nil {
+		return err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	network, exists := store.networks[networkID]
+	if !exists || network.ScopeID != scopeID {
+		return nil
+	}
+	for _, port := range store.ports {
+		if port.NetworkID == networkID {
+			return ErrNetworkHasDependents
+		}
+	}
+	for _, endpoint := range store.endpoints {
+		if endpoint.NetworkID == networkID {
+			return ErrNetworkHasDependents
+		}
+	}
+	delete(store.networks, networkID)
+	if err := store.saveLocked(); err != nil {
+		store.networks[networkID] = network
+		return err
+	}
+	return nil
+}
+
 func (store *FileNetworkStore) AllocatePort(ctx context.Context, scopeID, networkID, workloadID string, number uint16, protocol models.NetworkProtocol) (*models.NetworkPort, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -345,6 +376,78 @@ func (store *FileNetworkStore) AllocatePort(ctx context.Context, scopeID, networ
 	}
 	copy := candidate
 	return &copy, nil
+}
+
+func (store *FileNetworkStore) GetPort(ctx context.Context, scopeID, portID string) (*models.NetworkPort, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateNetworkScope(scopeID); err != nil {
+		return nil, err
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	port, exists := store.ports[portID]
+	if !exists || port.ScopeID != scopeID {
+		return nil, ErrNetworkPortNotFound
+	}
+	copy := port
+	return &copy, nil
+}
+
+func (store *FileNetworkStore) ListPorts(ctx context.Context, scopeID, networkID string, limit int) ([]models.NetworkPort, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateNetworkScope(scopeID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > MaxNetworkListLimit {
+		return nil, ErrInvalidNetworkListLimit
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	network, exists := store.networks[networkID]
+	if !exists || network.ScopeID != scopeID {
+		return nil, ErrNetworkNotFound
+	}
+	ports := make([]models.NetworkPort, 0, limit)
+	for _, port := range store.ports {
+		if port.NetworkID == networkID && port.ScopeID == scopeID {
+			ports = append(ports, port)
+		}
+	}
+	sort.Slice(ports, func(i, j int) bool { return ports[i].ID < ports[j].ID })
+	if len(ports) > limit {
+		ports = ports[:limit]
+	}
+	return ports, nil
+}
+
+func (store *FileNetworkStore) DeletePort(ctx context.Context, scopeID, portID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateNetworkScope(scopeID); err != nil {
+		return err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	port, exists := store.ports[portID]
+	if !exists || port.ScopeID != scopeID {
+		return nil
+	}
+	for _, endpoint := range store.endpoints {
+		if endpoint.PortID == portID {
+			return ErrNetworkPortAlreadyPublished
+		}
+	}
+	delete(store.ports, portID)
+	if err := store.saveLocked(); err != nil {
+		store.ports[portID] = port
+		return err
+	}
+	return nil
 }
 
 func (store *FileNetworkStore) PublishEndpoint(ctx context.Context, scopeID, networkID, portID, name string) (*models.NetworkEndpoint, error) {
@@ -402,6 +505,72 @@ func (store *FileNetworkStore) ResolveEndpoint(ctx context.Context, scopeID, end
 	}
 	copy := endpoint
 	return &copy, nil
+}
+
+func (store *FileNetworkStore) ListEndpoints(ctx context.Context, scopeID, networkID string, limit int) ([]models.NetworkEndpoint, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateNetworkScope(scopeID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > MaxNetworkListLimit {
+		return nil, ErrInvalidNetworkListLimit
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	network, exists := store.networks[networkID]
+	if !exists || network.ScopeID != scopeID {
+		return nil, ErrNetworkNotFound
+	}
+	endpoints := make([]models.NetworkEndpoint, 0, limit)
+	for _, endpoint := range store.endpoints {
+		if endpoint.NetworkID == networkID && endpoint.ScopeID == scopeID {
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	sort.Slice(endpoints, func(i, j int) bool { return endpoints[i].ID < endpoints[j].ID })
+	if len(endpoints) > limit {
+		endpoints = endpoints[:limit]
+	}
+	return endpoints, nil
+}
+
+func (store *FileNetworkStore) DeleteEndpoint(ctx context.Context, scopeID, endpointID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateNetworkScope(scopeID); err != nil {
+		return err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	endpoint, exists := store.endpoints[endpointID]
+	if !exists || endpoint.ScopeID != scopeID {
+		return nil
+	}
+	delete(store.endpoints, endpointID)
+	if err := store.saveLocked(); err != nil {
+		store.endpoints[endpointID] = endpoint
+		return err
+	}
+	return nil
+}
+
+func (store *FileNetworkStore) Reset(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.networks = make(map[string]models.Network)
+	store.ports = make(map[string]models.NetworkPort)
+	store.endpoints = make(map[string]models.NetworkEndpoint)
+	store.nextID = 0
+	if err := os.Remove(store.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ErrNetworkStoreIO
+	}
+	return nil
 }
 
 var _ NetworkStore = (*FileNetworkStore)(nil)
