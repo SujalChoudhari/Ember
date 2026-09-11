@@ -159,13 +159,22 @@ type WorkloadControlPlane interface {
 type WorkloadManager struct {
 	resources ResourceControlPlane
 	registry  *WorkloadProviderRegistry
+	networks  NetworkControlPlane
 }
 
 func NewWorkloadManager(resources ResourceControlPlane, registry *WorkloadProviderRegistry) (*WorkloadManager, error) {
+	return newWorkloadManager(resources, registry, nil)
+}
+
+func NewWorkloadManagerWithNetwork(resources ResourceControlPlane, registry *WorkloadProviderRegistry, networks NetworkControlPlane) (*WorkloadManager, error) {
+	return newWorkloadManager(resources, registry, networks)
+}
+
+func newWorkloadManager(resources ResourceControlPlane, registry *WorkloadProviderRegistry, networks NetworkControlPlane) (*WorkloadManager, error) {
 	if resources == nil || registry == nil {
 		return nil, ErrInvalidWorkloadControlPlane
 	}
-	return &WorkloadManager{resources: resources, registry: registry}, nil
+	return &WorkloadManager{resources: resources, registry: registry, networks: networks}, nil
 }
 
 func validateWorkloadRequest(ctx context.Context, scopeID string, spec models.ResourceSpec) error {
@@ -387,6 +396,11 @@ func (manager *WorkloadManager) DeleteWorkload(ctx context.Context, scopeID, res
 	}
 	if providerErr := provider.Delete(ctx, *resource); providerErr != nil {
 		return mapWorkloadProviderError(providerErr)
+	}
+	if manager.networks != nil {
+		if err := manager.networks.DeletePortsForWorkload(ctx, scopeID, resourceID); err != nil {
+			return err
+		}
 	}
 	if err := manager.resources.DeleteResource(ctx, scopeID, resourceID); errors.Is(err, persistence.ErrResourceNotFound) {
 		return ErrWorkloadNotFound

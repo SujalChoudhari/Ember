@@ -19,6 +19,7 @@ type NetworkControlPlane interface {
 	GetPort(ctx context.Context, scopeID, portID string) (*models.NetworkPort, error)
 	ListPorts(ctx context.Context, scopeID, networkID string, limit int) ([]models.NetworkPort, error)
 	DeletePort(ctx context.Context, scopeID, portID string) error
+	DeletePortsForWorkload(ctx context.Context, scopeID, workloadID string) error
 	PublishEndpoint(ctx context.Context, scopeID, networkID, portID, name string) (*models.NetworkEndpoint, error)
 	ResolveEndpoint(ctx context.Context, scopeID, endpointID string) (*models.NetworkEndpoint, error)
 	ListEndpoints(ctx context.Context, scopeID, networkID string, limit int) ([]models.NetworkEndpoint, error)
@@ -72,6 +73,10 @@ func (manager *NetworkManager) ListPorts(ctx context.Context, scopeID, networkID
 
 func (manager *NetworkManager) DeletePort(ctx context.Context, scopeID, portID string) error {
 	return manager.store.DeletePort(ctx, scopeID, portID)
+}
+
+func (manager *NetworkManager) DeletePortsForWorkload(ctx context.Context, scopeID, workloadID string) error {
+	return manager.store.DeletePortsForWorkload(ctx, scopeID, workloadID)
 }
 
 func (manager *NetworkManager) PublishEndpoint(ctx context.Context, scopeID, networkID, portID, name string) (*models.NetworkEndpoint, error) {
