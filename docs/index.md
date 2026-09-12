@@ -26,6 +26,7 @@ repository workflows rather than maintaining a second contract.
 - **Azure-shaped compatibility:** [Compatibility matrix](azure-shaped-compatibility.md)
 - **Deployment and recovery:** [Deployment, recovery, and release guide](deployment-and-recovery.md)
 - **Upgrade and release evidence:** [Sprint 2 release evidence](sprint-2-release-evidence.md)
+- **Sprint 2 closeout:** [Three-day closeout receipt](sprint-2-closeout.md)
 - **Resource and Blob evidence:** [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
 - **Queue and event evidence:** [Sprint 2 queue and event evidence](sprint-2-queue-event-evidence.md)
 - **Documentation validation:** `scripts/ember-docs-check.sh`
