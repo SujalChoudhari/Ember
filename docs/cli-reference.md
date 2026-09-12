@@ -1,0 +1,88 @@
+# Ember CLI reference
+
+The binary is built as `ember`. Every command emits one JSON response on
+stdout. Errors are written to stderr and return a non-zero process status.
+
+## Global flags
+
+These flags precede the command:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--state-dir PATH` | `$EMBER_STATE_DIR` or `.ember-state` | File-backed Ember state directory |
+| `--quota BYTES` | `67108864` | Blob quota in bytes |
+
+The shared `--scope ID` flag identifies the operator scope where shown. List
+commands accept `--limit`; limits are validated against the repository bounds.
+
+## Resource and Blob commands
+
+| Command | Flags |
+|---|---|
+| `resource create` | `--scope`, `--type`, `--name`, `--parent`, `--tags`, `--provider-namespace`, `--provider-type`, `--provider-version`, `--desired-state` |
+| `resource get` | `--scope`, `--id` |
+| `resource list` | `--scope`, `--limit` |
+| `resource update-tags` | `--scope`, `--id`, `--tags`, `--request-id`, `--correlation-id` |
+| `resource delete` | `--scope`, `--id`, `--confirm` |
+| `resource lock acquire` | `--scope`, `--id`, `--owner`, `--token` |
+| `resource lock inspect` | `--scope`, `--id` |
+| `resource lock release` | `--scope`, `--id`, `--owner`, `--token` |
+| `blob put` | `--scope`, `--bucket`, `--key`, `--data` |
+| `blob get` | `--scope`, `--bucket`, `--key`, optional paired `--start`, `--end` |
+| `blob verify` | `--scope`, `--bucket`, `--key` |
+| `blob recover` | `--scope`, `--bucket`, `--key`, `--expected-sha256`, `--data`, `--request-id`, `--correlation-id` |
+| `blob list` | `--scope`, `--bucket`, `--limit` |
+| `blob delete` | `--scope`, `--bucket`, `--key`, `--confirm` |
+
+Object range reads use an inclusive start and exclusive end. `blob recover`
+requires a trusted checksum and records an idempotent audited operation.
+
+## Workloads and observability
+
+| Command | Flags |
+|---|---|
+| `workload create` | `--scope`, `--name`, `--provider-namespace`, `--provider-type`, `--provider-version`, `--desired-state`, `--cpu-millis`, `--memory-bytes`, `--disk-bytes`, `--privileged`, `--allow-privilege-escalation` |
+| `workload get` | `--scope`, `--id` |
+| `workload inspect` | `--scope`, `--id`, `--limit` |
+| `workload restart` | `--scope`, `--id` |
+| `workload delete` | `--scope`, `--id`, `--confirm` |
+| `workload volume attach` | `--scope`, `--id`, `--name`, `--max-bytes` |
+| `workload volume list` | `--scope`, `--id`, `--limit` |
+| `workload volume cleanup` | `--scope`, `--id`, `--confirm` |
+| `observability metrics` | no command-specific flags |
+
+## Operations, audit, deployment, and reset
+
+| Command | Flags |
+|---|---|
+| `operation get` | `--scope`, `--id` |
+| `operation list` | `--scope`, `--resource`, `--limit` |
+| `audit list` | `--scope`, `--resource`, `--limit` |
+| `deployment plan` | `--scope`, one of `--document` or `--file`, repeatable `--parameter name=value` |
+| `deployment apply` | `--scope`, one of `--document` or `--file`, repeatable `--parameter name=value`, `--request-id`, `--correlation-id`, `--confirm` |
+| `deployment apply-progress get` | `--scope`, `--id` |
+| `deployment apply-progress list` | `--scope`, `--limit` |
+| `deployment apply-progress operation` | `--scope`, `--id` |
+| `deployment recovery get` | `--scope`, `--id` |
+| `deployment recovery list` | `--scope`, `--limit` |
+| `deployment recovery run` | `--scope`, `--request-id`, `--apply-progress-id`, `--action` (`rollback` or `forward`) |
+| `reset` | `--scope`, `--confirm` |
+
+`deployment apply` refuses destructive changes without `--confirm`. Root reset
+is confirmation-gated and scoped reset is denied. Unknown flags, positional
+arguments, incomplete recovery commands, unpaired range flags, and invalid list
+limits are rejected as invalid CLI requests.
+
+## Verified examples
+
+```text
+ember --state-dir /tmp/ember-state resource create --type group --name platform
+ember --state-dir /tmp/ember-state resource create --scope resource-00000001 --parent resource-00000001 --type bucket --name assets
+ember --state-dir /tmp/ember-state blob put --scope resource-00000001 --bucket resource-00000002 --key greeting --data hello-ember
+ember --state-dir /tmp/ember-state blob get --scope resource-00000001 --bucket resource-00000002 --key greeting
+ember --state-dir /tmp/ember-state reset --confirm
+```
+
+The clean-machine smoke script runs this lifecycle against disposable state;
+use `make smoke` or the [release evidence gate](sprint-2-release-evidence.md)
+to repeat it.
