@@ -25,6 +25,7 @@ repository workflows rather than maintaining a second contract.
 - **CLI contract:** [Versioned CLI reference](https://github.com/SujalChoudhari/Ember/issues/145) (planned)
 - **Upgrade and release evidence:** [Sprint 2 release evidence](sprint-2-release-evidence.md)
 - **Resource and Blob evidence:** [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
+- **Queue and event evidence:** [Sprint 2 queue and event evidence](sprint-2-queue-event-evidence.md)
 - **Deployment and recovery:** [Operations and release evidence](https://github.com/SujalChoudhari/Ember/issues/148) (planned)
 - **Project work:** [Open issues](https://github.com/SujalChoudhari/Ember/issues) and [recent changes](https://github.com/SujalChoudhari/Ember/commits/main)
 
@@ -43,6 +44,9 @@ repository workflows rather than maintaining a second contract.
   gate.
 - Resource scopes, read-only locks, safe deletion, Blob integrity, bounded
   cleanup, and reset evidence through the [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
+  guide.
+- Queue retry, dead-letter, redrive, acknowledgement, event outcomes, and
+  bounded metrics through the [Sprint 2 queue and event evidence](sprint-2-queue-event-evidence.md)
   guide.
 
 See the README quickstart and the source-linked issue-specific guides before

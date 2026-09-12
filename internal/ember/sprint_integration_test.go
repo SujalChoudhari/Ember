@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -196,5 +197,87 @@ func TestSprintTwoResourceBlobSurfacesShareBoundedCleanState(t *testing.T) {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("owned path %q after reset: error = %v, want os.ErrNotExist", path, err)
 		}
+	}
+}
+
+func TestSprintTwoQueueEventSurfacesShareBoundedRecoveryEvidence(t *testing.T) {
+	ctx := context.Background()
+	state := filepath.Join(t.TempDir(), "state")
+	deadLetters, err := queue.NewFileDeadLetterStore(filepath.Join(state, "dead-letters.json"), queue.DeadLetterStoreOptions{MaxRecords: 2})
+	if err != nil {
+		t.Fatalf("NewFileDeadLetterStore() error = %v", err)
+	}
+
+	delivery := queue.Delivery{ID: "message-1", CorrelationID: "correlation-queue", Payload: []byte("bounded-queue-payload")}
+	queueAttempts := 0
+	failed, err := queue.DeliverWithDeadLetter(ctx, delivery, queue.RetryPolicy{MaxRetries: 1}, func(context.Context, queue.Delivery) error {
+		queueAttempts++
+		return errors.New("consumer failure")
+	}, func(context.Context, time.Duration) error { return nil }, deadLetters)
+	if !errors.Is(err, queue.ErrDeliveryFailed) || failed.Status != queue.DeliveryStatusFailed || failed.Attempts != 2 || queueAttempts != 2 {
+		t.Fatalf("DeliverWithDeadLetter() = (%#v, %v), want bounded terminal failure", failed, err)
+	}
+	redriveCalls := 0
+	redriven, err := deadLetters.Redrive(ctx, "request-queue-recovery", delivery, queue.RetryPolicy{}, func(context.Context, queue.Delivery) error {
+		redriveCalls++
+		return nil
+	}, nil)
+	if err != nil || redriven.Status != queue.DeliveryStatusSucceeded || redriveCalls != 1 {
+		t.Fatalf("Redrive() = (%#v, %v), want one successful recovery", redriven, err)
+	}
+	replayed, err := deadLetters.Redrive(ctx, "request-queue-recovery", delivery, queue.RetryPolicy{}, func(context.Context, queue.Delivery) error {
+		redriveCalls++
+		return errors.New("must not run on replay")
+	}, nil)
+	if err != nil || !reflect.DeepEqual(replayed, redriven) || redriveCalls != 1 {
+		t.Fatalf("Redrive(replay) = (%#v, %v), calls=%d; want idempotent replay", replayed, err, redriveCalls)
+	}
+
+	fileQueue, err := queue.NewFileQueue(filepath.Join(state, "queue.json"), queue.QueueOptions{MaxMessages: 1, MaxBytes: 64, VisibilityTimeout: time.Minute})
+	if err != nil {
+		t.Fatalf("NewFileQueue() error = %v", err)
+	}
+	messageID, err := fileQueue.Enqueue(ctx, "correlation-progress", []byte("progress"))
+	if err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	received, err := fileQueue.Receive(ctx)
+	if err != nil || received.ID != messageID || received.CorrelationID != "correlation-progress" {
+		t.Fatalf("Receive() = (%#v, %v), want correlated progress", received, err)
+	}
+	if err := fileQueue.Acknowledge(ctx, received.Receipt); err != nil {
+		t.Fatalf("Acknowledge() error = %v", err)
+	}
+
+	metrics := events.NewMetrics()
+	event := events.Event{ID: "event-1", CorrelationID: "correlation-event", Type: "resource.updated", Payload: []byte("bounded-event")}
+	eventAttempts := 0
+	delivered, err := events.DeliverWithMetrics(ctx, event, queue.RetryPolicy{MaxRetries: 1}, func(context.Context, events.Event) error {
+		eventAttempts++
+		if eventAttempts == 1 {
+			return errors.New("transient event failure")
+		}
+		return nil
+	}, func(context.Context, time.Duration) error { return nil }, deadLetters, metrics)
+	if err != nil || delivered.Status != queue.DeliveryStatusSucceeded || delivered.Attempts != 2 {
+		t.Fatalf("DeliverWithMetrics(success) = (%#v, %v), want retry then success", delivered, err)
+	}
+	failedEvent := events.Event{ID: "event-2", CorrelationID: "correlation-failure", Type: "resource.updated", Payload: []byte("bounded-failure")}
+	terminal, err := events.DeliverWithMetrics(ctx, failedEvent, queue.RetryPolicy{}, func(context.Context, events.Event) error {
+		return errors.New("terminal event failure")
+	}, func(context.Context, time.Duration) error { return nil }, deadLetters, metrics)
+	if !errors.Is(err, queue.ErrDeliveryFailed) || terminal.Status != queue.DeliveryStatusFailed {
+		t.Fatalf("DeliverWithMetrics(failure) = (%#v, %v), want terminal failure", terminal, err)
+	}
+	recovered, err := events.Recover(ctx, deadLetters, "request-event-recovery", failedEvent, queue.RetryPolicy{}, func(context.Context, events.Event) error { return nil }, nil, metrics)
+	if err != nil || recovered.Status != queue.DeliveryStatusSucceeded {
+		t.Fatalf("Recover() = (%#v, %v), want successful recovery", recovered, err)
+	}
+	snapshot := metrics.Snapshot()
+	if snapshot.DeliveryCount != 2 || snapshot.SuccessCount != 1 || snapshot.FailureCount != 1 || snapshot.RetryCount != 1 || snapshot.DeadLetterCount != 1 || snapshot.RecoveryCount != 1 || snapshot.RecoveryFailureCount != 0 {
+		t.Fatalf("Metrics.Snapshot() = %#v, want bounded delivery/recovery counters", snapshot)
+	}
+	if records, err := deadLetters.List(ctx, 2); err != nil || len(records) != 0 {
+		t.Fatalf("dead-letter records after recovery = (%#v, %v), want empty", records, err)
 	}
 }
