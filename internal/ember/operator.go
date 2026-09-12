@@ -163,6 +163,10 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	if err != nil {
 		return nil, err
 	}
+	recoveryStore, err := persistence.NewFileRecoveryStore(filepath.Join(root, "recoveries.json"))
+	if err != nil {
+		return nil, err
+	}
 	networkStore, err := persistence.NewFileNetworkStore(filepath.Join(root, "networks.json"))
 	if err != nil {
 		return nil, err
@@ -190,6 +194,9 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 			return err
 		}
 		if err := progressStore.Reset(ctx); err != nil {
+			return err
+		}
+		if err := recoveryStore.Reset(ctx); err != nil {
 			return err
 		}
 		if err := provider.Reset(ctx); err != nil {
@@ -221,6 +228,18 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 		return nil, err
 	}
 	operator.applyProgress = progressStore
+	recoveryAuthority, err := deployment.NewRecoveryAuthority(progressStore, recoveryStore, &fileRecoveryExecutor{operator: operator})
+	if err != nil {
+		return nil, err
+	}
+	deploymentControl, err := NewStoreDeploymentControlPlane(progressStore, recoveryStore, recoveryAuthority, func(ctx context.Context, principal OperatorPrincipal, resourceID string) error {
+		_, _, err := operator.authorizeResource(ctx, principal, resourceID)
+		return err
+	}, coordinator)
+	if err != nil {
+		return nil, err
+	}
+	operator.deployment = deploymentControl
 	return operator, nil
 }
 

@@ -274,4 +274,19 @@ func (store *FileRecoveryStore) List(ctx context.Context, limit int) ([]models.R
 	return records, nil
 }
 
+// Reset removes only the recovery snapshot owned by this store.
+func (store *FileRecoveryStore) Reset(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := os.Remove(store.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return ErrRecoveryStoreIO
+	}
+	store.records = make(map[string]models.RecoveryRecord)
+	store.requests = make(map[string]string)
+	return nil
+}
+
 var _ RecoveryStore = (*FileRecoveryStore)(nil)

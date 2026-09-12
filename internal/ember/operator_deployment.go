@@ -2,11 +2,43 @@ package ember
 
 import (
 	"context"
+	"errors"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
+
+var ErrUnsupportedFileRecovery = errors.New("file recovery action is unsupported")
+
+// fileRecoveryExecutor applies the safe recovery subset available from the
+// persisted, redacted progress record. Rollback can remove completed creates;
+// updates and forward recovery require desired/prior provider state that the
+// progress record intentionally does not retain.
+type fileRecoveryExecutor struct {
+	operator *Operator
+}
+
+func (executor *fileRecoveryExecutor) Rollback(ctx context.Context, entry models.ApplyProgressEntry) error {
+	if executor == nil || executor.operator == nil || entry.Action != models.ApplyProgressActionCreate {
+		return ErrUnsupportedFileRecovery
+	}
+	resource, err := executor.operator.findLogicalResource(ctx, OperatorPrincipal{}, entry.LogicalID)
+	if errors.Is(err, persistence.ErrResourceNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if entry.ResourceID != "" && resource.ID != entry.ResourceID {
+		return ErrUnsupportedFileRecovery
+	}
+	return executor.operator.resources.DeleteResource(ctx, resource.Spec.ParentID, resource.ID)
+}
+
+func (executor *fileRecoveryExecutor) ForwardRecover(context.Context, models.ApplyProgressEntry) error {
+	return ErrUnsupportedFileRecovery
+}
 
 // DeploymentControlPlane exposes the bounded deployment records and explicit
 // recovery action without adding a second persistence or recovery contract.
