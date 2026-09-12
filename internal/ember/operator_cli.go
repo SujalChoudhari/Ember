@@ -78,6 +78,8 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 		}
 	case "workload":
 		return runCLIWorkload(ctx, operator, args[1:], output)
+	case "observability":
+		return runCLIObservability(ctx, operator, args[1:], output)
 	case "operation":
 		if len(args) < 2 {
 			return ErrInvalidCLIRequest
@@ -102,6 +104,17 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 	default:
 		return ErrInvalidCLIRequest
 	}
+}
+
+func runCLIObservability(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	if len(args) != 1 || args[0] != "metrics" {
+		return ErrInvalidCLIRequest
+	}
+	metrics, err := operator.SnapshotMetrics()
+	if err != nil {
+		return err
+	}
+	return writeCLIResponse(output, &OperatorResponse{Metrics: &metrics})
 }
 
 func runCLIWorkload(ctx context.Context, operator *Operator, args []string, output io.Writer) error {

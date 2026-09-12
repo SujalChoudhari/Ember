@@ -83,6 +83,7 @@ type OperatorResponse struct {
 	Endpoint        *models.NetworkEndpoint      `json:"endpoint,omitempty"`
 	Endpoints       []models.NetworkEndpoint     `json:"endpoints,omitempty"`
 	Observability   *RuntimeObservabilityReport  `json:"observability,omitempty"`
+	Metrics         *events.MetricsSnapshot      `json:"metrics,omitempty"`
 	Volumes         []models.WorkloadVolume      `json:"volumes,omitempty"`
 	Plan            *deployment.DeploymentPlan   `json:"plan,omitempty"`
 	Resolution      *deployment.ResolvedDocument `json:"resolution,omitempty"`
@@ -307,6 +308,13 @@ func (operator *Operator) InspectWorkload(ctx context.Context, principal Operato
 		return nil, err
 	}
 	return operator.observability.InspectWorkload(ctx, principal.ScopeID, resourceID, logLimit)
+}
+
+func (operator *Operator) SnapshotMetrics() (events.MetricsSnapshot, error) {
+	if operator.observability == nil {
+		return events.MetricsSnapshot{}, ErrOperatorWorkloadUnavailable
+	}
+	return operator.observability.SnapshotMetrics(), nil
 }
 
 func (operator *Operator) AttachWorkloadVolume(ctx context.Context, principal OperatorPrincipal, resourceID, name string, maxBytes int64) (*models.WorkloadVolume, error) {
