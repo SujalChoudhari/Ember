@@ -879,3 +879,21 @@ func TestHTTPDeploymentDestructiveApplyRequiresConfirmation(t *testing.T) {
 		t.Fatalf("deployment apply with confirmation status = %d, body = %s", confirmed.Code, confirmed.Body.String())
 	}
 }
+
+func TestHTTPExposesBoundedMetricsSnapshot(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	response := operatorHTTPCall(t, NewHTTPHandler(operator), http.MethodGet, "/v1/observability/metrics", "", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /v1/observability/metrics status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var envelope OperatorResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode observability metrics response error = %v", err)
+	}
+	if envelope.Metrics == nil || envelope.Metrics.Cardinality != 1 {
+		t.Fatalf("HTTP observability metrics = %#v, want constant-cardinality snapshot", envelope)
+	}
+}

@@ -103,6 +103,20 @@ func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, reques
 		writeOperatorError(writer, http.StatusInternalServerError, ErrInvalidOperator)
 		return
 	}
+	if request.URL.Path == "/v1/observability/metrics" {
+		if request.Method != http.MethodGet {
+			writer.Header().Set("Allow", http.MethodGet)
+			writeOperatorError(writer, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+			return
+		}
+		metrics, err := handler.operator.SnapshotMetrics()
+		if err != nil {
+			writeOperatorError(writer, operatorErrorStatus(err), err)
+			return
+		}
+		writeOperatorJSON(writer, http.StatusOK, &OperatorResponse{Metrics: &metrics})
+		return
+	}
 	if request.URL.Path == "/v1/workloads" {
 		if request.Method != http.MethodPost {
 			writer.Header().Set("Allow", http.MethodPost)

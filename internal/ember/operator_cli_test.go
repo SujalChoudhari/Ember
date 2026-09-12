@@ -363,3 +363,14 @@ func TestCLIDestructiveActionsRequireExplicitConfirmation(t *testing.T) {
 		t.Fatalf("CLI confirmed deployment apply error = %v", err)
 	}
 }
+
+func TestCLIExposesBoundedMetricsSnapshot(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	metrics := runOperatorCLI(t, operator, "observability", "metrics")
+	if metrics.Metrics == nil || metrics.Metrics.Cardinality != 1 {
+		t.Fatalf("CLI observability metrics = %#v, want constant-cardinality snapshot", metrics)
+	}
+}
