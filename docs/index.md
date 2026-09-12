@@ -15,19 +15,20 @@ repository workflows rather than maintaining a second contract.
 ## Learner path
 
 - **Quickstart:** [Golden clean-machine lifecycle](../README.md#golden-clean-machine-lifecycle)
-- **Architecture:** [Architecture and conceptual model](https://github.com/SujalChoudhari/Ember/issues/144) (planned)
-- **Resource safety:** [Lifecycle, scopes, locks, and safe deletion](https://github.com/SujalChoudhari/Ember/issues/146) (planned)
-- **Blob behavior:** [Blob, quota, checksum, range, and cleanup guide](https://github.com/SujalChoudhari/Ember/issues/147) (planned)
+- **Architecture:** [Architecture and conceptual model](architecture.md)
+- **Resource safety:** [Lifecycle, scopes, locks, and safe deletion](lifecycle-and-blobs.md)
+- **Blob behavior:** [Blob, quota, checksum, range, and cleanup guide](lifecycle-and-blobs.md)
 
 ## Contributor path
 
 - **Build and test:** [Build, package, and install](../README.md#build-package-and-install)
-- **CLI contract:** [Versioned CLI reference](https://github.com/SujalChoudhari/Ember/issues/145) (planned)
+- **CLI contract:** [Versioned CLI reference](cli-reference.md)
 - **Azure-shaped compatibility:** [Compatibility matrix](azure-shaped-compatibility.md)
+- **Deployment and recovery:** [Deployment, recovery, and release guide](deployment-and-recovery.md)
 - **Upgrade and release evidence:** [Sprint 2 release evidence](sprint-2-release-evidence.md)
 - **Resource and Blob evidence:** [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
 - **Queue and event evidence:** [Sprint 2 queue and event evidence](sprint-2-queue-event-evidence.md)
-- **Deployment and recovery:** [Operations and release evidence](https://github.com/SujalChoudhari/Ember/issues/148) (planned)
+- **Documentation validation:** `scripts/ember-docs-check.sh`
 - **Project work:** [Open issues](https://github.com/SujalChoudhari/Ember/issues) and [recent changes](https://github.com/SujalChoudhari/Ember/commits/main)
 
 ## Documentation status
@@ -52,16 +53,18 @@ repository workflows rather than maintaining a second contract.
 - Azure-shaped resource, CLI, HTTP, operation, workload, network, queue, and
   safety semantics through the [compatibility matrix](azure-shaped-compatibility.md),
   with explicit hosted-Azure non-goals.
+- Source-grounded architecture, CLI, lifecycle, deployment, recovery, and
+  release navigation through the guides linked above. The attached GitHub Wiki
+  remains pending the explicit visibility/Wiki authorization gate.
 
 See the README quickstart and the source-linked issue-specific guides before
 assuming behavior beyond these verified paths.
 
 ### Planned or separately documented
 
-The detailed architecture, CLI, lifecycle, Blob, deployment, and release guides
-are tracked as separate issues so each can be checked against the implementation
-without turning this index into a duplicate command reference. Planned product
-areas must not be presented as available behavior.
+The detailed guides are checked against the implementation by
+`scripts/ember-docs-check.sh` and the repository test/release gates. Planned
+product areas must not be presented as available behavior.
 
 ### Deliberate non-goals and boundaries
 
