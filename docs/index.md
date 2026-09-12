@@ -23,6 +23,7 @@ repository workflows rather than maintaining a second contract.
 
 - **Build and test:** [Build, package, and install](../README.md#build-package-and-install)
 - **CLI contract:** [Versioned CLI reference](https://github.com/SujalChoudhari/Ember/issues/145) (planned)
+- **Azure-shaped compatibility:** [Compatibility matrix](azure-shaped-compatibility.md)
 - **Upgrade and release evidence:** [Sprint 2 release evidence](sprint-2-release-evidence.md)
 - **Resource and Blob evidence:** [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
 - **Queue and event evidence:** [Sprint 2 queue and event evidence](sprint-2-queue-event-evidence.md)
@@ -48,6 +49,9 @@ repository workflows rather than maintaining a second contract.
 - Queue retry, dead-letter, redrive, acknowledgement, event outcomes, and
   bounded metrics through the [Sprint 2 queue and event evidence](sprint-2-queue-event-evidence.md)
   guide.
+- Azure-shaped resource, CLI, HTTP, operation, workload, network, queue, and
+  safety semantics through the [compatibility matrix](azure-shaped-compatibility.md),
+  with explicit hosted-Azure non-goals.
 
 See the README quickstart and the source-linked issue-specific guides before
 assuming behavior beyond these verified paths.
