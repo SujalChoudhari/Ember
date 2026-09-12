@@ -131,3 +131,70 @@ func TestSprintOneSurfacesShareBoundedCleanState(t *testing.T) {
 		}
 	}
 }
+
+func TestSprintTwoResourceBlobSurfacesShareBoundedCleanState(t *testing.T) {
+	ctx := context.Background()
+	state := filepath.Join(t.TempDir(), "state")
+	operator, err := NewFileOperator(state, 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+
+	group, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "platform"})
+	if err != nil {
+		t.Fatalf("CreateResource(group) error = %v", err)
+	}
+	bucket, err := operator.CreateResource(ctx, OperatorPrincipal{ScopeID: group.ID}, models.ResourceSpec{Type: models.ResourceTypeBucket, Name: "assets", ParentID: group.ID})
+	if err != nil {
+		t.Fatalf("CreateResource(bucket) error = %v", err)
+	}
+
+	lock := models.ResourceLock{Owner: "sprint-two", Token: "lock-token"}
+	if err := operator.AcquireResourceLock(ctx, OperatorPrincipal{}, group.ID, lock); err != nil {
+		t.Fatalf("AcquireResourceLock() error = %v", err)
+	}
+	if _, err := operator.UpdateResourceTags(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, map[string]string{"tier": "blocked"}, "request-locked", "correlation-locked"); !errors.Is(err, persistence.ErrResourceLocked) {
+		t.Fatalf("UpdateResourceTags(locked) error = %v, want resource lock", err)
+	}
+	if err := operator.ReleaseResourceLock(ctx, OperatorPrincipal{}, group.ID, lock); err != nil {
+		t.Fatalf("ReleaseResourceLock() error = %v", err)
+	}
+
+	trusted := []byte("hello world")
+	put, err := operator.PutBlob(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, "nested/file.txt", trusted)
+	if err != nil || put == nil || put.Object == nil {
+		t.Fatalf("PutBlob() = (%#v, %v), want bounded object", put, err)
+	}
+	rangeResult, err := operator.ReadBlobRange(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, "nested/file.txt", 6, 11)
+	if err != nil || string(rangeResult.Content) != "world" {
+		t.Fatalf("ReadBlobRange() = (%#v, %v), want world", rangeResult, err)
+	}
+
+	payloadPath := filepath.Join(state, "blobs", "objects", bucket.ID, "nested", "file.txt")
+	if err := os.WriteFile(payloadPath, []byte("payloAd"), 0o600); err != nil {
+		t.Fatalf("WriteFile(corrupt payload) error = %v", err)
+	}
+	integrity, verifyErr := operator.VerifyBlob(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, "nested/file.txt")
+	if !errors.Is(verifyErr, persistence.ErrBlobObjectCorrupt) || integrity == nil || integrity.Integrity == nil || integrity.Integrity.Status != models.BlobIntegrityCorrupt {
+		t.Fatalf("VerifyBlob(corrupt) = (%#v, %v), want bounded corruption evidence", integrity, verifyErr)
+	}
+	if _, err := operator.RecoverBlob(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, "nested/file.txt", put.Object.SHA256, trusted, "request-recover", "correlation-recover"); err != nil {
+		t.Fatalf("RecoverBlob() error = %v", err)
+	}
+	if recovered, err := operator.GetBlob(ctx, OperatorPrincipal{ScopeID: group.ID}, bucket.ID, "nested/file.txt"); err != nil || string(recovered.Content) != string(trusted) {
+		t.Fatalf("GetBlob(after recovery) = (%#v, %v), want trusted payload", recovered, err)
+	}
+
+	if err := operator.Reset(ctx, OperatorPrincipal{}); err != nil {
+		t.Fatalf("Reset() error = %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(state, "resources.json"),
+		filepath.Join(state, "blobs", "metadata.json"),
+		filepath.Join(state, "blobs", "objects"),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("owned path %q after reset: error = %v, want os.ErrNotExist", path, err)
+		}
+	}
+}

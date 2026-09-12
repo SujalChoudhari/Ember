@@ -24,6 +24,7 @@ repository workflows rather than maintaining a second contract.
 - **Build and test:** [Build, package, and install](../README.md#build-package-and-install)
 - **CLI contract:** [Versioned CLI reference](https://github.com/SujalChoudhari/Ember/issues/145) (planned)
 - **Upgrade and release evidence:** [Sprint 2 release evidence](sprint-2-release-evidence.md)
+- **Resource and Blob evidence:** [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
 - **Deployment and recovery:** [Operations and release evidence](https://github.com/SujalChoudhari/Ember/issues/148) (planned)
 - **Project work:** [Open issues](https://github.com/SujalChoudhari/Ember/issues) and [recent changes](https://github.com/SujalChoudhari/Ember/commits/main)
 
@@ -40,6 +41,9 @@ repository workflows rather than maintaining a second contract.
 - Repeatable upgrade, rollback, package-provenance, race, static-analysis, and
   clean-machine release evidence through the [Sprint 2 release evidence](sprint-2-release-evidence.md)
   gate.
+- Resource scopes, read-only locks, safe deletion, Blob integrity, bounded
+  cleanup, and reset evidence through the [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
+  guide.
 
 See the README quickstart and the source-linked issue-specific guides before
 assuming behavior beyond these verified paths.
