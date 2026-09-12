@@ -23,6 +23,7 @@ repository workflows rather than maintaining a second contract.
 
 - **Build and test:** [Build, package, and install](../README.md#build-package-and-install)
 - **CLI contract:** [Versioned CLI reference](https://github.com/SujalChoudhari/Ember/issues/145) (planned)
+- **Upgrade and release evidence:** [Sprint 2 release evidence](sprint-2-release-evidence.md)
 - **Deployment and recovery:** [Operations and release evidence](https://github.com/SujalChoudhari/Ember/issues/148) (planned)
 - **Project work:** [Open issues](https://github.com/SujalChoudhari/Ember/issues) and [recent changes](https://github.com/SujalChoudhari/Ember/commits/main)
 
@@ -36,6 +37,9 @@ repository workflows rather than maintaining a second contract.
 - Blob write and read through the CLI smoke path.
 - Reproducible Go tests, platform-labelled packaging, checksum verification
   during installation, and confirmation-gated reset.
+- Repeatable upgrade, rollback, package-provenance, race, static-analysis, and
+  clean-machine release evidence through the [Sprint 2 release evidence](sprint-2-release-evidence.md)
+  gate.
 
 See the README quickstart and the source-linked issue-specific guides before
 assuming behavior beyond these verified paths.
