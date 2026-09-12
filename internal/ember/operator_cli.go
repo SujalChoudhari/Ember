@@ -321,6 +321,9 @@ func runCLIDeployment(ctx context.Context, operator *Operator, args []string, ou
 			return ErrInvalidCLIRequest
 		}
 	case "recovery":
+		if len(args) < 2 {
+			return ErrInvalidCLIRequest
+		}
 		switch args[1] {
 		case "get":
 			return runCLIGetRecovery(ctx, operator, args[2:], output)

@@ -374,3 +374,10 @@ func TestCLIExposesBoundedMetricsSnapshot(t *testing.T) {
 		t.Fatalf("CLI observability metrics = %#v, want constant-cardinality snapshot", metrics)
 	}
 }
+
+func TestCLIRejectsIncompleteRecoveryCommand(t *testing.T) {
+	operator := newTestOperator(t)
+	if _, err := runOperatorCLIResult(t, operator, "deployment", "recovery"); !errors.Is(err, ErrInvalidCLIRequest) {
+		t.Fatalf("CLI incomplete recovery command error = %v, want invalid request", err)
+	}
+}
