@@ -16,6 +16,55 @@ import (
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
 )
 
+func TestFileOperatorWiresDeploymentInspectionAndIdempotentRollback(t *testing.T) {
+	ctx := context.Background()
+	operator, err := NewFileOperator(filepath.Join(t.TempDir(), "state"), 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	resource, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "platform"})
+	if err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+	mutation, err := operator.UpdateResourceTags(ctx, OperatorPrincipal{}, resource.ID, map[string]string{"tier": "test"}, "operation-progress", "correlation-progress")
+	if err != nil {
+		t.Fatalf("UpdateResourceTags() error = %v", err)
+	}
+	now := time.Unix(1, 0).UTC()
+	progress := models.ApplyProgressRecord{
+		ID: "apply-recovery-1", RequestID: "apply-request-recovery-1", CorrelationID: "apply-correlation-recovery-1",
+		Status: models.ApplyProgressFailed, OperationIDs: []string{mutation.Operation.ID},
+		Entries:   []models.ApplyProgressEntry{{LogicalID: "/resources/group/platform", ResourceID: resource.ID, Action: models.ApplyProgressActionCreate, Status: models.ApplyProgressSucceeded, OperationID: mutation.Operation.ID, StartedAt: now, CompletedAt: now.Add(time.Second)}},
+		CreatedAt: now, UpdatedAt: now.Add(time.Second),
+	}
+	if _, err := operator.applyProgress.Create(ctx, progress); err != nil {
+		t.Fatalf("ApplyProgress.Create() error = %v", err)
+	}
+
+	var output []byte
+	response, err := runDeploymentCLI(operator, &output, "deployment", "apply-progress", "get", "--id", progress.ID)
+	if err != nil || response.ApplyProgress == nil || response.ApplyProgress.ID != progress.ID {
+		t.Fatalf("apply progress inspection = (%#v, %v), want persisted record", response, err)
+	}
+	response, err = runDeploymentCLI(operator, &output, "deployment", "recovery", "run", "--request-id", "recover-actual-1", "--apply-progress-id", progress.ID, "--action", "rollback")
+	if err != nil || response.Recovery == nil || response.Recovery.Outcome != models.RecoveryOutcomeRecovered {
+		t.Fatalf("recovery run = (%#v, %v), want recovered outcome", response, err)
+	}
+	if _, err := operator.GetResource(ctx, OperatorPrincipal{}, resource.ID); !errors.Is(err, persistence.ErrResourceNotFound) {
+		t.Fatalf("rolled-back resource lookup error = %v, want resource removed", err)
+	}
+	response, err = runDeploymentCLI(operator, &output, "deployment", "recovery", "run", "--request-id", "recover-actual-1", "--apply-progress-id", progress.ID, "--action", "rollback")
+	if err != nil || !response.Replayed {
+		t.Fatalf("replayed recovery = (%#v, %v), want durable idempotent replay", response, err)
+	}
+	if err := operator.Reset(ctx, OperatorPrincipal{}); err != nil {
+		t.Fatalf("Reset() error = %v", err)
+	}
+	if records, err := operator.ListRecoveries(ctx, OperatorPrincipal{}, 10); err != nil || len(records) != 0 {
+		t.Fatalf("recoveries after reset = (%#v, %v), want empty clean state", records, err)
+	}
+}
+
 func TestCLIExposesBoundedApplyProgressInspection(t *testing.T) {
 	operator := newOperatorWithDeploymentStub(t, &deploymentInspectionStub{
 		progress: &models.ApplyProgressRecord{
