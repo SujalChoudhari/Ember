@@ -56,10 +56,13 @@ const (
 type Action string
 
 const (
-	ActionRead   Action = "read"
-	ActionWrite  Action = "write"
-	ActionDelete Action = "delete"
-	ActionAdmin  Action = "admin"
+	ActionRead         Action = "read"
+	ActionWrite        Action = "write"
+	ActionDelete       Action = "delete"
+	ActionAdmin        Action = "admin"
+	ActionSecretRead   Action = "secret.read"
+	ActionSecretWrite  Action = "secret.write"
+	ActionSecretDelete Action = "secret.delete"
 )
 
 type Scope struct {
@@ -141,7 +144,7 @@ func validateAction(action Action) error {
 		return ErrInvalidAction
 	}
 	switch action {
-	case ActionRead, ActionWrite, ActionDelete, ActionAdmin:
+	case ActionRead, ActionWrite, ActionDelete, ActionAdmin, ActionSecretRead, ActionSecretWrite, ActionSecretDelete:
 		return nil
 	default:
 		return ErrInvalidAction
