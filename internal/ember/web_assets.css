@@ -1,0 +1,70 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #16202a;
+  background: #f4f7f8;
+  line-height: 1.5;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 0; }
+a { color: #075985; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.shell { width: min(100% - 2rem, 72rem); margin: 0 auto; }
+.site-header { background: #102a43; color: #fff; }
+.header-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem 0; }
+.brand { color: #fff; font-weight: 750; text-decoration: none; letter-spacing: .02em; }
+nav { display: flex; gap: .8rem; flex-wrap: wrap; justify-content: flex-end; }
+nav a { color: #d9f0ff; text-decoration: none; }
+main { padding: 2rem 0; }
+.hero { margin-bottom: 1.5rem; }
+h1, h2, h3 { line-height: 1.15; margin-top: 0; }
+h1 { font-size: clamp(1.8rem, 5vw, 3rem); margin-bottom: .6rem; }
+h2 { font-size: 1.35rem; }
+h3 { font-size: 1rem; margin-bottom: .35rem; }
+p { margin: .35rem 0 1rem; }
+.eyebrow { color: #52738b; font-size: .76rem; font-weight: 800; letter-spacing: .12em; margin-bottom: .4rem; text-transform: uppercase; }
+.muted { color: #52616b; }
+.grid { display: grid; gap: 1rem; }
+.two-column { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 1rem; }
+.card { background: #fff; border: 1px solid #d9e2ec; border-radius: .7rem; box-shadow: 0 2px 8px rgb(16 42 67 / 5%); margin-bottom: 1rem; padding: 1.2rem; min-width: 0; }
+.warning-card { border-color: #f2c078; }
+.section-heading { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.badge { background: #e6f6ff; border-radius: 999px; color: #075985; font-size: .8rem; padding: .25rem .6rem; white-space: nowrap; }
+.stack { display: grid; gap: .8rem; }
+label { display: grid; gap: .3rem; font-weight: 650; }
+input, select, button { border: 1px solid #9fb3c8; border-radius: .4rem; font: inherit; min-height: 2.5rem; padding: .55rem .65rem; }
+input, select { background: #fff; color: inherit; width: 100%; }
+button, .button { background: #0b7285; border-color: #0b7285; color: #fff; cursor: pointer; display: inline-block; font-weight: 700; text-align: center; text-decoration: none; }
+button:hover, .button:hover { background: #075985; border-color: #075985; }
+.button { border-radius: .4rem; padding: .55rem .75rem; }
+.secondary { background: #eef6fa; border-color: #a7c9d8; color: #075985; }
+.danger { background: #b42318; border-color: #b42318; }
+.checkbox { align-items: center; display: flex; font-weight: 500; gap: .5rem; }
+.checkbox input { min-height: 1rem; width: 1rem; }
+.list-grid { display: grid; gap: .65rem; }
+.list-item { align-items: center; border: 1px solid #e1e8ed; border-radius: .55rem; display: flex; gap: 1rem; justify-content: space-between; min-width: 0; padding: .8rem; }
+.list-item > div { min-width: 0; }
+.list-item h3 { overflow-wrap: anywhere; }
+.notice { border-radius: .5rem; margin-bottom: 1rem; padding: .8rem 1rem; }
+.error { background: #fff0f0; border: 1px solid #f3a6a6; color: #8a1c1c; }
+details { border-top: 1px solid #e1e8ed; padding-top: .7rem; }
+summary { cursor: pointer; font-weight: 700; }
+.details-body { padding-top: .8rem; }
+.subheading { border-top: 1px solid #e1e8ed; margin-top: 1.4rem; padding-top: 1.2rem; }
+.table-wrap { max-width: 100%; overflow-x: auto; }
+table { border-collapse: collapse; min-width: 38rem; width: 100%; }
+th, td { border-bottom: 1px solid #e1e8ed; padding: .6rem; text-align: left; vertical-align: top; }
+th { color: #52616b; font-size: .8rem; text-transform: uppercase; }
+.footer { color: #52616b; font-size: .85rem; padding: 0 0 2rem; }
+@media (max-width: 44rem) {
+  .header-row { align-items: flex-start; flex-direction: column; }
+  nav { justify-content: flex-start; }
+  .two-column { grid-template-columns: 1fr; }
+}
+@media (max-width: 24rem) {
+  .shell { width: min(100% - 1rem, 72rem); }
+  main { padding-top: 1rem; }
+  .card { padding: .85rem; }
+  .section-heading, .list-item { align-items: flex-start; flex-direction: column; }
+  .button { width: 100%; }
+}
