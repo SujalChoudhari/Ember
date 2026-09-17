@@ -963,6 +963,16 @@ func TestReadOnlyLockBlocksResourceMutations(t *testing.T) {
 				return store
 			},
 		},
+		{
+			name: "sqlite",
+			newStore: func(t *testing.T) ResourceStore {
+				store, err := NewSQLiteResourceStore(filepath.Join(t.TempDir(), "platform.db"))
+				if err != nil {
+					t.Fatalf("NewSQLiteResourceStore() error = %v", err)
+				}
+				return store
+			},
+		},
 	}
 
 	for _, tt := range tests {

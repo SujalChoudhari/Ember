@@ -143,7 +143,7 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 		return nil, ErrInvalidOperator
 	}
 
-	resourceStore, err := persistence.NewFileResourceStore(filepath.Join(root, "resources.json"))
+	resourceStore, err := persistence.NewSQLiteResourceStore(filepath.Join(root, "platform.db"))
 	if err != nil {
 		return nil, err
 	}
