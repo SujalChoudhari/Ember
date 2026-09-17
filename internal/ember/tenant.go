@@ -14,7 +14,7 @@ func (operator *Operator) CreateTenant(ctx context.Context, principal OperatorPr
 	if err := principal.validate(); err != nil {
 		return nil, err
 	}
-	if principal.ScopeID != "" {
+	if principal.ScopeID != "" || principal.TenantID != "" {
 		return nil, ErrOperatorScopeDenied
 	}
 	if operator == nil || operator.tenants == nil {
@@ -27,7 +27,7 @@ func (operator *Operator) ListTenants(ctx context.Context, principal OperatorPri
 	if err := principal.validate(); err != nil {
 		return nil, err
 	}
-	if principal.ScopeID != "" {
+	if principal.ScopeID != "" || principal.TenantID != "" {
 		return nil, ErrOperatorScopeDenied
 	}
 	if operator == nil || operator.tenants == nil {
@@ -54,7 +54,7 @@ func (operator *Operator) DeleteTenant(ctx context.Context, principal OperatorPr
 	if err := principal.validate(); err != nil {
 		return err
 	}
-	if principal.ScopeID != "" {
+	if principal.ScopeID != "" || principal.TenantID != "" {
 		return ErrOperatorScopeDenied
 	}
 	if operator == nil || operator.tenants == nil {
@@ -62,6 +62,9 @@ func (operator *Operator) DeleteTenant(ctx context.Context, principal OperatorPr
 	}
 	if !confirm {
 		return ErrDestructiveConfirmationRequired
+	}
+	if err := operator.closeTenantResourceStore(id); err != nil {
+		return err
 	}
 	return operator.tenants.DeleteTenant(ctx, id)
 }
@@ -73,7 +76,7 @@ func (operator *Operator) authorizeTenant(ctx context.Context, principal Operato
 	if operator == nil || operator.tenants == nil {
 		return ErrOperatorTenantUnavailable
 	}
-	if principal.ScopeID != "" && principal.ScopeID != id {
+	if (principal.ScopeID != "" && principal.ScopeID != id) || principal.TenantID != "" {
 		return ErrOperatorScopeDenied
 	}
 	if _, err := operator.tenants.GetTenant(ctx, id); err != nil {

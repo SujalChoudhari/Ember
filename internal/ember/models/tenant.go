@@ -24,14 +24,21 @@ type Tenant struct {
 }
 
 func (tenant Tenant) Validate() error {
-	if !validTenantID(tenant.ID) {
-		return ErrInvalidTenantID
+	if err := ValidateTenantID(tenant.ID); err != nil {
+		return err
 	}
 	if displayName := strings.TrimSpace(tenant.DisplayName); displayName == "" || len(displayName) > MaxTenantDisplayNameLength {
 		return ErrInvalidTenantDisplayName
 	}
 	if !tenant.CreatedAt.IsZero() && tenant.CreatedAt.UnixNano() <= 0 {
 		return ErrInvalidTenantDisplayName
+	}
+	return nil
+}
+
+func ValidateTenantID(value string) error {
+	if !validTenantID(value) {
+		return ErrInvalidTenantID
 	}
 	return nil
 }
