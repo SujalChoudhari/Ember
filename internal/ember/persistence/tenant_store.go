@@ -318,6 +318,40 @@ func (store *TenantStore) OpenTenant(ctx context.Context, id string) (*TenantDat
 	return &TenantDatabase{db: database, id: id}, nil
 }
 
+func (store *TenantStore) OpenResourceStore(ctx context.Context, id string) (*SQLiteResourceStore, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateTenantID(id); err != nil {
+		return nil, err
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if err := store.ensureOpen(); err != nil {
+		return nil, err
+	}
+	tenant, err := store.getTenantLocked(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	_, databasePath, err := store.tenantPathsLocked(id, false)
+	if err != nil {
+		return nil, err
+	}
+	database, err := openSQLiteExisting(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateTenantSchema(ctx, database, *tenant); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	if err := database.Close(); err != nil {
+		return nil, ErrTenantStoreIO
+	}
+	return NewSQLiteResourceStoreWithIDPrefix(databasePath, "tenant-"+id+"-")
+}
+
 func (store *TenantStore) getTenantLocked(ctx context.Context, id string) (*models.Tenant, error) {
 	var tenant models.Tenant
 	var createdAt string

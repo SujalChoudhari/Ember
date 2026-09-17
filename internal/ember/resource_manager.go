@@ -73,4 +73,15 @@ func (manager *ResourceManager) InspectResourceLock(ctx context.Context, scopeID
 	return manager.store.InspectLock(ctx, scopeID, resourceID)
 }
 
+func (manager *ResourceManager) Close() error {
+	if manager == nil || manager.store == nil {
+		return nil
+	}
+	closer, ok := manager.store.(interface{ Close() error })
+	if !ok {
+		return nil
+	}
+	return closer.Close()
+}
+
 var _ ResourceControlPlane = (*ResourceManager)(nil)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
 	"github.com/SujalChoudhari/Ember/internal/ember/events"
@@ -38,12 +39,18 @@ func validateOperatorListLimit(limit int) error {
 }
 
 type OperatorPrincipal struct {
-	ScopeID string
+	ScopeID  string
+	TenantID string
 }
 
 func (principal OperatorPrincipal) validate() error {
 	if principal.ScopeID != "" && (strings.TrimSpace(principal.ScopeID) == "" || len(principal.ScopeID) > models.MaxResourceIDLength) {
 		return ErrInvalidOperatorPrincipal
+	}
+	if principal.TenantID != "" {
+		if err := models.ValidateTenantID(principal.TenantID); err != nil {
+			return ErrInvalidOperatorPrincipal
+		}
 	}
 	return nil
 }
@@ -59,6 +66,9 @@ type Operator struct {
 	observability RuntimeObservability
 	applyProgress persistence.ApplyProgressStore
 	tenants       *persistence.TenantStore
+
+	tenantResourcesMu sync.Mutex
+	tenantResources   map[string]*ResourceManager
 }
 
 type OperatorResponse struct {
@@ -121,14 +131,15 @@ func newOperatorWithRuntimeAndNetwork(resources ResourceControlPlane, blobs pers
 		return nil, ErrInvalidOperator
 	}
 	return &Operator{
-		resources:     resources,
-		blobs:         blobs,
-		operations:    operations,
-		reset:         reset,
-		deployment:    deployment,
-		workloads:     workloads,
-		networks:      networks,
-		observability: observability,
+		resources:       resources,
+		blobs:           blobs,
+		operations:      operations,
+		reset:           reset,
+		deployment:      deployment,
+		workloads:       workloads,
+		networks:        networks,
+		observability:   observability,
+		tenantResources: make(map[string]*ResourceManager),
 	}, nil
 }
 
@@ -249,6 +260,9 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	}
 	previousReset := operator.reset
 	operator.reset = func(ctx context.Context) error {
+		if err := operator.closeTenantResourceStores(); err != nil {
+			return err
+		}
 		if err := previousReset(ctx); err != nil {
 			return err
 		}
@@ -259,14 +273,100 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	return operator, nil
 }
 
+func (operator *Operator) tenantResourceManager(ctx context.Context, tenantID string) (*ResourceManager, error) {
+	if operator == nil || operator.tenants == nil {
+		return nil, ErrOperatorTenantUnavailable
+	}
+	operator.tenantResourcesMu.Lock()
+	defer operator.tenantResourcesMu.Unlock()
+	if manager, ok := operator.tenantResources[tenantID]; ok {
+		return manager, nil
+	}
+	store, err := operator.tenants.OpenResourceStore(ctx, tenantID)
+	if errors.Is(err, persistence.ErrTenantNotFound) {
+		return nil, ErrOperatorScopeDenied
+	}
+	if err != nil {
+		return nil, err
+	}
+	manager, err := NewResourceManager(store)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	if operator.tenantResources == nil {
+		operator.tenantResources = make(map[string]*ResourceManager)
+	}
+	operator.tenantResources[tenantID] = manager
+	return manager, nil
+}
+
+func (operator *Operator) resourcePlane(ctx context.Context, principal OperatorPrincipal) (ResourceControlPlane, error) {
+	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	if principal.TenantID == "" {
+		return operator.resources, nil
+	}
+	return operator.tenantResourceManager(ctx, principal.TenantID)
+}
+
+func (operator *Operator) closeTenantResourceStore(tenantID string) error {
+	operator.tenantResourcesMu.Lock()
+	defer operator.tenantResourcesMu.Unlock()
+	manager, ok := operator.tenantResources[tenantID]
+	if !ok {
+		return nil
+	}
+	if err := manager.Close(); err != nil {
+		return err
+	}
+	delete(operator.tenantResources, tenantID)
+	return nil
+}
+
+func (operator *Operator) closeTenantResourceStores() error {
+	operator.tenantResourcesMu.Lock()
+	defer operator.tenantResourcesMu.Unlock()
+	for tenantID, manager := range operator.tenantResources {
+		if err := manager.Close(); err != nil {
+			return err
+		}
+		delete(operator.tenantResources, tenantID)
+	}
+	return nil
+}
+
+func (operator *Operator) Close() error {
+	if operator == nil {
+		return nil
+	}
+	if err := operator.closeTenantResourceStores(); err != nil {
+		return err
+	}
+	if closer, ok := operator.resources.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			return err
+		}
+	}
+	if operator.tenants != nil {
+		return operator.tenants.Close()
+	}
+	return nil
+}
+
 func (operator *Operator) CreateResource(ctx context.Context, principal OperatorPrincipal, spec models.ResourceSpec) (*models.Resource, error) {
 	if err := principal.validate(); err != nil {
+		return nil, err
+	}
+	resources, err := operator.resourcePlane(ctx, principal)
+	if err != nil {
 		return nil, err
 	}
 	if spec.ParentID != principal.ScopeID {
 		return nil, ErrOperatorScopeDenied
 	}
-	return operator.resources.CreateResource(ctx, spec)
+	return resources.CreateResource(ctx, spec)
 }
 
 func (operator *Operator) CreateWorkload(ctx context.Context, principal OperatorPrincipal, spec models.ResourceSpec) (*WorkloadView, error) {
@@ -501,26 +601,38 @@ func (operator *Operator) ListResources(ctx context.Context, principal OperatorP
 	if err := principal.validate(); err != nil {
 		return nil, err
 	}
-	resources, err := operator.resources.ListResources(ctx, principal.ScopeID, limit)
-	if errors.Is(err, persistence.ErrResourceNotFound) && principal.ScopeID != "" {
+	resources, err := operator.resourcePlane(ctx, principal)
+	if err != nil {
+		return nil, err
+	}
+	listed, err := resources.ListResources(ctx, principal.ScopeID, limit)
+	if errors.Is(err, persistence.ErrResourceNotFound) && (principal.ScopeID != "" || principal.TenantID != "") {
 		return nil, ErrOperatorScopeDenied
 	}
-	return resources, err
+	return listed, err
 }
 
 func (operator *Operator) authorizeResource(ctx context.Context, principal OperatorPrincipal, resourceID string) (*models.Resource, string, error) {
 	if err := principal.validate(); err != nil {
 		return nil, "", err
 	}
+	resources, err := operator.resourcePlane(ctx, principal)
+	if err != nil {
+		return nil, "", err
+	}
 	scopeID := operator.resourceLookupScope(principal, resourceID)
-	resource, err := operator.resources.GetResource(ctx, scopeID, resourceID)
-	if errors.Is(err, persistence.ErrResourceNotFound) && principal.ScopeID != "" {
+	resource, err := resources.GetResource(ctx, scopeID, resourceID)
+	if errors.Is(err, persistence.ErrResourceNotFound) && (principal.ScopeID != "" || principal.TenantID != "") {
 		return nil, "", ErrOperatorScopeDenied
 	}
 	return resource, scopeID, err
 }
 
 func (operator *Operator) ensureResourceUnlocked(ctx context.Context, principal OperatorPrincipal, resource *models.Resource, scopeID string) error {
+	resources, err := operator.resourcePlane(ctx, principal)
+	if err != nil {
+		return err
+	}
 	visited := make(map[string]struct{})
 	for resource != nil {
 		if _, seen := visited[resource.ID]; seen {
@@ -528,7 +640,7 @@ func (operator *Operator) ensureResourceUnlocked(ctx context.Context, principal 
 		}
 		visited[resource.ID] = struct{}{}
 
-		lock, err := operator.resources.InspectResourceLock(ctx, scopeID, resource.ID)
+		lock, err := resources.InspectResourceLock(ctx, scopeID, resource.ID)
 		if err != nil {
 			return err
 		}
@@ -541,8 +653,8 @@ func (operator *Operator) ensureResourceUnlocked(ctx context.Context, principal 
 
 		parentID := resource.Spec.ParentID
 		parentScope := operator.resourceLookupScope(principal, parentID)
-		resource, err = operator.resources.GetResource(ctx, parentScope, parentID)
-		if errors.Is(err, persistence.ErrResourceNotFound) && principal.ScopeID != "" {
+		resource, err = resources.GetResource(ctx, parentScope, parentID)
+		if errors.Is(err, persistence.ErrResourceNotFound) && (principal.ScopeID != "" || principal.TenantID != "") {
 			return ErrOperatorScopeDenied
 		}
 		if err != nil {
@@ -555,6 +667,10 @@ func (operator *Operator) ensureResourceUnlocked(ctx context.Context, principal 
 
 func (operator *Operator) UpdateResourceTags(ctx context.Context, principal OperatorPrincipal, resourceID string, tags map[string]string, requestID, correlationID string) (*OperatorResponse, error) {
 	resource, scopeID, err := operator.authorizeResource(ctx, principal, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	resources, err := operator.resourcePlane(ctx, principal)
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +687,7 @@ func (operator *Operator) UpdateResourceTags(ctx context.Context, principal Oper
 	}
 	var updated *models.Resource
 	result, err := operator.operations.Execute(ctx, request, func(effectContext context.Context) error {
-		updated, err = operator.resources.UpdateResourceTags(effectContext, scopeID, resourceID, tags)
+		updated, err = resources.UpdateResourceTags(effectContext, scopeID, resourceID, tags)
 		return err
 	})
 	if err != nil && result == nil {
@@ -588,7 +704,7 @@ func (operator *Operator) UpdateResourceTags(ctx context.Context, principal Oper
 		return nil, ErrOperatorResetUnavailable
 	}
 	if updated == nil {
-		updated, err = operator.resources.GetResource(ctx, scopeID, resourceID)
+		updated, err = resources.GetResource(ctx, scopeID, resourceID)
 		if err != nil {
 			return nil, err
 		}
@@ -606,7 +722,11 @@ func (operator *Operator) DeleteResource(ctx context.Context, principal Operator
 	if err != nil {
 		return err
 	}
-	return operator.resources.DeleteResource(ctx, scopeID, resourceID)
+	resources, err := operator.resourcePlane(ctx, principal)
+	if err != nil {
+		return err
+	}
+	return resources.DeleteResource(ctx, scopeID, resourceID)
 }
 
 func (operator *Operator) AcquireResourceLock(ctx context.Context, principal OperatorPrincipal, resourceID string, lock models.ResourceLock) error {
@@ -614,7 +734,11 @@ func (operator *Operator) AcquireResourceLock(ctx context.Context, principal Ope
 	if err != nil {
 		return err
 	}
-	return operator.resources.AcquireResourceLock(ctx, scopeID, resourceID, lock)
+	resources, err := operator.resourcePlane(ctx, principal)
+	if err != nil {
+		return err
+	}
+	return resources.AcquireResourceLock(ctx, scopeID, resourceID, lock)
 }
 
 func (operator *Operator) ReleaseResourceLock(ctx context.Context, principal OperatorPrincipal, resourceID string, lock models.ResourceLock) error {
@@ -622,7 +746,11 @@ func (operator *Operator) ReleaseResourceLock(ctx context.Context, principal Ope
 	if err != nil {
 		return err
 	}
-	return operator.resources.ReleaseResourceLock(ctx, scopeID, resourceID, lock)
+	resources, err := operator.resourcePlane(ctx, principal)
+	if err != nil {
+		return err
+	}
+	return resources.ReleaseResourceLock(ctx, scopeID, resourceID, lock)
 }
 
 func (operator *Operator) InspectResourceLock(ctx context.Context, principal OperatorPrincipal, resourceID string) (*models.ResourceLock, error) {
@@ -630,7 +758,11 @@ func (operator *Operator) InspectResourceLock(ctx context.Context, principal Ope
 	if err != nil {
 		return nil, err
 	}
-	return operator.resources.InspectResourceLock(ctx, scopeID, resourceID)
+	resources, err := operator.resourcePlane(ctx, principal)
+	if err != nil {
+		return nil, err
+	}
+	return resources.InspectResourceLock(ctx, scopeID, resourceID)
 }
 
 func (operator *Operator) GetOperation(ctx context.Context, principal OperatorPrincipal, operationID string) (*models.Operation, error) {
@@ -658,7 +790,11 @@ func (operator *Operator) findLogicalResource(ctx context.Context, principal Ope
 	if err := principal.validate(); err != nil {
 		return nil, err
 	}
-	pending, err := operator.resources.ListResources(ctx, principal.ScopeID, persistence.MaxResourceListLimit)
+	resources, err := operator.resourcePlane(ctx, principal)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := resources.ListResources(ctx, principal.ScopeID, persistence.MaxResourceListLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +810,7 @@ func (operator *Operator) findLogicalResource(ctx context.Context, principal Ope
 		if candidate == logicalID {
 			return &resource, nil
 		}
-		children, listErr := operator.resources.ListResources(ctx, resource.ID, persistence.MaxResourceListLimit)
+		children, listErr := resources.ListResources(ctx, resource.ID, persistence.MaxResourceListLimit)
 		if listErr != nil && !errors.Is(listErr, persistence.ErrResourceNotFound) {
 			return nil, listErr
 		}

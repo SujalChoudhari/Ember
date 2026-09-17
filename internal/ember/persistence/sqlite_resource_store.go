@@ -26,10 +26,11 @@ var (
 // ownership intentionally remains process-local, matching FileResourceStore;
 // resource identity and desired/observed state are durable.
 type SQLiteResourceStore struct {
-	mu     sync.Mutex
-	db     *sql.DB
-	locks  map[string]models.ResourceLock
-	closed bool
+	mu       sync.Mutex
+	db       *sql.DB
+	locks    map[string]models.ResourceLock
+	idPrefix string
+	closed   bool
 }
 
 type sqliteResourcePayload struct {
@@ -42,6 +43,14 @@ type sqliteQueryer interface {
 }
 
 func NewSQLiteResourceStore(path string) (*SQLiteResourceStore, error) {
+	return newSQLiteResourceStore(path, "")
+}
+
+func NewSQLiteResourceStoreWithIDPrefix(path, idPrefix string) (*SQLiteResourceStore, error) {
+	return newSQLiteResourceStore(path, idPrefix)
+}
+
+func newSQLiteResourceStore(path, idPrefix string) (*SQLiteResourceStore, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, ErrInvalidSQLiteResourceStorePath
 	}
@@ -61,7 +70,7 @@ func NewSQLiteResourceStore(path string) (*SQLiteResourceStore, error) {
 	if err != nil {
 		return nil, ErrResourceStoreIO
 	}
-	store := &SQLiteResourceStore{db: database, locks: make(map[string]models.ResourceLock)}
+	store := &SQLiteResourceStore{db: database, locks: make(map[string]models.ResourceLock), idPrefix: idPrefix}
 	if err := store.ensureSchema(context.Background()); err != nil {
 		_ = database.Close()
 		return nil, err
@@ -280,7 +289,7 @@ func (store *SQLiteResourceStore) Create(ctx context.Context, spec models.Resour
 	}
 	nextID++
 	resource := &models.Resource{
-		ID: nextResourceID(nextID),
+		ID: store.resourceID(nextID),
 		Spec: models.ResourceSpec{
 			Type:              spec.Type,
 			Name:              spec.Name,
@@ -317,6 +326,13 @@ func (store *SQLiteResourceStore) Create(ctx context.Context, spec models.Resour
 
 func nextResourceID(nextID int64) string {
 	return fmt.Sprintf("resource-%08d", nextID)
+}
+
+func (store *SQLiteResourceStore) resourceID(nextID int64) string {
+	if store == nil || store.idPrefix == "" {
+		return nextResourceID(nextID)
+	}
+	return fmt.Sprintf("resource-%s%08d", store.idPrefix, nextID)
 }
 
 func cloneSQLiteResource(resource *models.Resource) *models.Resource {

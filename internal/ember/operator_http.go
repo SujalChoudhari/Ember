@@ -236,7 +236,10 @@ func (handler *operatorHTTPHandler) ServeHTTP(writer http.ResponseWriter, reques
 }
 
 func operatorPrincipal(request *http.Request) OperatorPrincipal {
-	return OperatorPrincipal{ScopeID: request.Header.Get("X-Ember-Scope")}
+	return OperatorPrincipal{
+		ScopeID:  request.Header.Get("X-Ember-Scope"),
+		TenantID: request.Header.Get("X-Ember-Tenant"),
+	}
 }
 
 func decodeOperatorJSON(writer http.ResponseWriter, request *http.Request, destination any) error {

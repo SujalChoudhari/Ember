@@ -575,6 +575,7 @@ func requireCLIListLimit(limit int) error {
 func runCLICreateResource(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("resource create")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	resourceType := set.String("type", "", "resource type")
 	name := set.String("name", "", "resource name")
 	parentID := set.String("parent", "", "parent resource ID")
@@ -593,7 +594,7 @@ func runCLICreateResource(ctx context.Context, operator *Operator, args []string
 	if err != nil {
 		return err
 	}
-	resource, err := operator.CreateResource(ctx, OperatorPrincipal{ScopeID: *scopeID}, models.ResourceSpec{
+	resource, err := operator.CreateResource(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, models.ResourceSpec{
 		Type: models.ResourceType(*resourceType), Name: *name, ParentID: *parentID, Tags: tags,
 		Provider:     models.ProviderMetadata{Namespace: *providerNamespace, Type: *providerType, Version: *providerVersion},
 		DesiredState: models.ResourceState(*desiredState),
@@ -607,6 +608,7 @@ func runCLICreateResource(ctx context.Context, operator *Operator, args []string
 func runCLIGetResource(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("resource get")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	resourceID := set.String("id", "", "resource ID")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
@@ -614,7 +616,7 @@ func runCLIGetResource(ctx context.Context, operator *Operator, args []string, o
 	if err := requireNoCLIArgs(set); err != nil {
 		return err
 	}
-	resource, err := operator.GetResource(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID)
+	resource, err := operator.GetResource(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *resourceID)
 	if err != nil {
 		return err
 	}
@@ -624,6 +626,7 @@ func runCLIGetResource(ctx context.Context, operator *Operator, args []string, o
 func runCLIListResources(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("resource list")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	limit := set.Int("limit", MaxOperatorListLimit, "maximum resources")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
@@ -634,7 +637,7 @@ func runCLIListResources(ctx context.Context, operator *Operator, args []string,
 	if err := requireCLIListLimit(*limit); err != nil {
 		return err
 	}
-	resources, err := operator.ListResources(ctx, OperatorPrincipal{ScopeID: *scopeID}, *limit)
+	resources, err := operator.ListResources(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *limit)
 	if err != nil {
 		return err
 	}
@@ -644,6 +647,7 @@ func runCLIListResources(ctx context.Context, operator *Operator, args []string,
 func runCLIDeleteResource(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("resource delete")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	resourceID := set.String("id", "", "resource ID")
 	confirm := set.Bool("confirm", false, "confirm resource deletion")
 	if err := set.Parse(args); err != nil {
@@ -655,7 +659,7 @@ func runCLIDeleteResource(ctx context.Context, operator *Operator, args []string
 	if !*confirm {
 		return ErrDestructiveConfirmationRequired
 	}
-	if err := operator.DeleteResource(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID); err != nil {
+	if err := operator.DeleteResource(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *resourceID); err != nil {
 		return err
 	}
 	return writeCLIResponse(output, &OperatorResponse{})
@@ -664,6 +668,7 @@ func runCLIDeleteResource(ctx context.Context, operator *Operator, args []string
 func runCLIAcquireResourceLock(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("resource lock acquire")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	resourceID := set.String("id", "", "resource ID")
 	owner := set.String("owner", "", "lock owner")
 	token := set.String("token", "", "lock token")
@@ -674,7 +679,7 @@ func runCLIAcquireResourceLock(ctx context.Context, operator *Operator, args []s
 		return err
 	}
 	lock := models.ResourceLock{Owner: *owner, Token: *token}
-	if err := operator.AcquireResourceLock(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, lock); err != nil {
+	if err := operator.AcquireResourceLock(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *resourceID, lock); err != nil {
 		return err
 	}
 	return writeCLIResponse(output, &OperatorResponse{Lock: &lock})
@@ -683,6 +688,7 @@ func runCLIAcquireResourceLock(ctx context.Context, operator *Operator, args []s
 func runCLIReleaseResourceLock(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("resource lock release")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	resourceID := set.String("id", "", "resource ID")
 	owner := set.String("owner", "", "lock owner")
 	token := set.String("token", "", "lock token")
@@ -692,7 +698,7 @@ func runCLIReleaseResourceLock(ctx context.Context, operator *Operator, args []s
 	if err := requireNoCLIArgs(set); err != nil {
 		return err
 	}
-	if err := operator.ReleaseResourceLock(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, models.ResourceLock{Owner: *owner, Token: *token}); err != nil {
+	if err := operator.ReleaseResourceLock(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *resourceID, models.ResourceLock{Owner: *owner, Token: *token}); err != nil {
 		return err
 	}
 	return writeCLIResponse(output, &OperatorResponse{})
@@ -701,6 +707,7 @@ func runCLIReleaseResourceLock(ctx context.Context, operator *Operator, args []s
 func runCLIInspectResourceLock(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("resource lock inspect")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	resourceID := set.String("id", "", "resource ID")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
@@ -708,7 +715,7 @@ func runCLIInspectResourceLock(ctx context.Context, operator *Operator, args []s
 	if err := requireNoCLIArgs(set); err != nil {
 		return err
 	}
-	lock, err := operator.InspectResourceLock(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID)
+	lock, err := operator.InspectResourceLock(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *resourceID)
 	if err != nil {
 		return err
 	}
@@ -718,6 +725,7 @@ func runCLIInspectResourceLock(ctx context.Context, operator *Operator, args []s
 func runCLIUpdateResourceTags(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("resource update-tags")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	resourceID := set.String("id", "", "resource ID")
 	tagsText := set.String("tags", "", "comma-separated key=value tags")
 	requestID := set.String("request-id", "", "idempotency request ID")
@@ -732,7 +740,7 @@ func runCLIUpdateResourceTags(ctx context.Context, operator *Operator, args []st
 	if err != nil {
 		return err
 	}
-	response, err := operator.UpdateResourceTags(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, tags, *requestID, *correlationID)
+	response, err := operator.UpdateResourceTags(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *resourceID, tags, *requestID, *correlationID)
 	if err != nil {
 		return err
 	}
@@ -878,6 +886,7 @@ func runCLIDeleteBlob(ctx context.Context, operator *Operator, args []string, ou
 func runCLIGetOperation(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("operation get")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	operationID := set.String("id", "", "operation ID")
 	if err := set.Parse(args); err != nil {
 		return ErrInvalidCLIRequest
@@ -885,7 +894,7 @@ func runCLIGetOperation(ctx context.Context, operator *Operator, args []string, 
 	if err := requireNoCLIArgs(set); err != nil {
 		return err
 	}
-	operation, err := operator.GetOperation(ctx, OperatorPrincipal{ScopeID: *scopeID}, *operationID)
+	operation, err := operator.GetOperation(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *operationID)
 	if err != nil {
 		return err
 	}
@@ -895,6 +904,7 @@ func runCLIGetOperation(ctx context.Context, operator *Operator, args []string, 
 func runCLIListOperations(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("operation list")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	resourceID := set.String("resource", "", "resource ID")
 	limit := set.Int("limit", MaxOperatorListLimit, "maximum operations")
 	if err := set.Parse(args); err != nil {
@@ -906,7 +916,7 @@ func runCLIListOperations(ctx context.Context, operator *Operator, args []string
 	if err := requireCLIListLimit(*limit); err != nil {
 		return err
 	}
-	operations, err := operator.ListOperations(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, *limit)
+	operations, err := operator.ListOperations(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *resourceID, *limit)
 	if err != nil {
 		return err
 	}
@@ -916,6 +926,7 @@ func runCLIListOperations(ctx context.Context, operator *Operator, args []string
 func runCLIListAudit(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
 	set := newCLIFlagSet("audit list")
 	scopeID := set.String("scope", "", "operator scope")
+	tenantID := set.String("tenant", "", "tenant ID")
 	resourceID := set.String("resource", "", "resource ID")
 	limit := set.Int("limit", MaxOperatorListLimit, "maximum entries")
 	if err := set.Parse(args); err != nil {
@@ -927,7 +938,7 @@ func runCLIListAudit(ctx context.Context, operator *Operator, args []string, out
 	if err := requireCLIListLimit(*limit); err != nil {
 		return err
 	}
-	history, err := operator.ListAuditHistory(ctx, OperatorPrincipal{ScopeID: *scopeID}, *resourceID, *limit)
+	history, err := operator.ListAuditHistory(ctx, OperatorPrincipal{ScopeID: *scopeID, TenantID: *tenantID}, *resourceID, *limit)
 	if err != nil {
 		return err
 	}
