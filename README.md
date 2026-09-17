@@ -53,3 +53,72 @@ ember --state-dir /path/to/state reset --confirm
 ```
 
 Reset is intentionally confirmation-gated and removes only Ember-owned state.
+
+## Event handling
+
+Ember includes a bounded, inspectable event path rather than treating delivery as
+an invisible background detail:
+
+- topics and subscriptions with scope, owner, name, event-type, and correlation
+  filters;
+- queue receive and acknowledgement with restart-persistent state;
+- bounded retry and terminal dead-letter recording;
+- redrive with request-identity idempotency and concurrent-recovery exclusion;
+- event outcomes, correlation identifiers, and constant-cardinality delivery,
+  retry, dead-letter, and recovery metrics;
+- redacted failure evidence: dead-letter state keeps stable failure metadata and
+  payload digests without persisting payloads or consumer error details.
+
+The event surface is deliberately local-first. It does not claim distributed
+exactly-once delivery, cross-node coordination, or cloud-provider semantics. The
+focused evidence lives in `docs/sprint-2-queue-event-evidence.md` and the
+`internal/ember/events` and `internal/ember/queue` packages.
+
+## Why Ember should exist next to Azure
+
+Ember should not try to beat Azure on global scale or managed-service breadth. Its
+advantage can be a system that is easier to understand, reproduce, and trust on a
+single machine:
+
+- **Failure-readable by default:** every retry, dead-letter, recovery, and reset
+  boundary should be inspectable without reading server logs or guessing hidden
+  state.
+- **Safe by construction:** destructive actions require explicit confirmation;
+  scope, locks, redaction, bounded state, and idempotency are part of the core
+  contract rather than optional operational add-ons.
+- **Offline and owner-controlled:** the same artifact can be learned, tested,
+  packaged, and run without a cloud account, subscription, network service, or
+  vendor control plane.
+- **Reproducible learning:** clean-machine smoke, package checksums, source-linked
+  documentation, and deterministic bounded fixtures make behavior easier to
+  verify than a large hosted system.
+- **Explainable operations:** a learner or operator should be able to ask why an
+  operation was denied, retried, recovered, or refused without reconstructing the
+  answer from distributed telemetry.
+
+These are product principles, not claims that Ember currently matches Azure's
+scale, availability, or service breadth.
+
+## Candidate next differentiators
+
+The following are proposals, not implemented behavior. They should become separate
+bounded issues with focused contract tests before implementation:
+
+1. **Explain mode:** return a structured decision trace for scope denial, lock
+   refusal, quota rejection, retry exhaustion, and safe-delete refusal.
+2. **Deterministic event replay:** replay a bounded event journal against a test
+   state directory with a fixed clock and compare the resulting state and metrics.
+3. **Local policy packs:** let owners declare quotas, retention, allowed providers,
+   and destructive-action rules as versioned, inspectable policy files.
+4. **Causal operation timelines:** link request, operation, audit, event delivery,
+   retry, dead-letter, and recovery records into one readable timeline.
+5. **Provider conformance kits:** make a provider implement a small contract suite
+   and produce the same safety/recovery evidence before it can be selected.
+6. **A small operator UI/TUI:** show resources, event flow, dead letters, locks,
+   recovery decisions, and explanations without hiding the underlying JSON/CLI
+   contract.
+
+The strongest next differentiator is probably **explain mode plus deterministic
+replay**: it would make Ember unusually teachable and unusually good at answering
+“what happened, and can I reproduce it?” without pretending to be a hosted Azure
+replacement.
