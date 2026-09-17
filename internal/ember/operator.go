@@ -58,9 +58,12 @@ type Operator struct {
 	networks      NetworkControlPlane
 	observability RuntimeObservability
 	applyProgress persistence.ApplyProgressStore
+	tenants       *persistence.TenantStore
 }
 
 type OperatorResponse struct {
+	Tenant          *models.Tenant               `json:"tenant,omitempty"`
+	Tenants         []models.Tenant              `json:"tenants,omitempty"`
 	Resource        *models.Resource             `json:"resource,omitempty"`
 	Resources       []models.Resource            `json:"resources,omitempty"`
 	Lock            *models.ResourceLock         `json:"lock,omitempty"`
@@ -240,6 +243,18 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	if err != nil {
 		return nil, err
 	}
+	tenantStore, err := persistence.NewTenantStore(root)
+	if err != nil {
+		return nil, err
+	}
+	previousReset := operator.reset
+	operator.reset = func(ctx context.Context) error {
+		if err := previousReset(ctx); err != nil {
+			return err
+		}
+		return tenantStore.Reset(ctx)
+	}
+	operator.tenants = tenantStore
 	operator.deployment = deploymentControl
 	return operator, nil
 }

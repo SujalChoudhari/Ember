@@ -24,6 +24,8 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 		return ErrInvalidCLIRequest
 	}
 	switch args[0] {
+	case "tenant":
+		return runCLITenant(ctx, operator, args[1:], output)
 	case "resource":
 		if len(args) < 2 {
 			return ErrInvalidCLIRequest
@@ -101,6 +103,60 @@ func RunCLI(ctx context.Context, operator *Operator, args []string, output io.Wr
 		return runCLIDeployment(ctx, operator, args[1:], output)
 	case "reset":
 		return runCLIReset(ctx, operator, args[1:], output)
+	default:
+		return ErrInvalidCLIRequest
+	}
+}
+
+func runCLITenant(ctx context.Context, operator *Operator, args []string, output io.Writer) error {
+	if len(args) < 1 {
+		return ErrInvalidCLIRequest
+	}
+	switch args[0] {
+	case "create":
+		set := newCLIFlagSet("tenant create")
+		id := set.String("id", "", "tenant ID")
+		displayName := set.String("name", "", "tenant display name")
+		if err := set.Parse(args[1:]); err != nil || requireNoCLIArgs(set) != nil {
+			return ErrInvalidCLIRequest
+		}
+		tenant, err := operator.CreateTenant(ctx, OperatorPrincipal{}, models.Tenant{ID: *id, DisplayName: *displayName})
+		if err != nil {
+			return err
+		}
+		return writeCLIResponse(output, &OperatorResponse{Tenant: tenant})
+	case "list":
+		if len(args) != 1 {
+			return ErrInvalidCLIRequest
+		}
+		tenants, err := operator.ListTenants(ctx, OperatorPrincipal{})
+		if err != nil {
+			return err
+		}
+		return writeCLIResponse(output, &OperatorResponse{Tenants: tenants})
+	case "get":
+		set := newCLIFlagSet("tenant get")
+		id := set.String("id", "", "tenant ID")
+		scopeID := set.String("scope", "", "operator tenant scope")
+		if err := set.Parse(args[1:]); err != nil || requireNoCLIArgs(set) != nil {
+			return ErrInvalidCLIRequest
+		}
+		tenant, err := operator.GetTenant(ctx, OperatorPrincipal{ScopeID: *scopeID}, *id)
+		if err != nil {
+			return err
+		}
+		return writeCLIResponse(output, &OperatorResponse{Tenant: tenant})
+	case "delete":
+		set := newCLIFlagSet("tenant delete")
+		id := set.String("id", "", "tenant ID")
+		confirm := set.Bool("confirm", false, "confirm tenant deletion")
+		if err := set.Parse(args[1:]); err != nil || requireNoCLIArgs(set) != nil {
+			return ErrInvalidCLIRequest
+		}
+		if err := operator.DeleteTenant(ctx, OperatorPrincipal{}, *id, *confirm); err != nil {
+			return err
+		}
+		return writeCLIResponse(output, &OperatorResponse{})
 	default:
 		return ErrInvalidCLIRequest
 	}
