@@ -13,6 +13,7 @@ import (
 	"github.com/SujalChoudhari/Ember/internal/ember/events"
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
+	"github.com/SujalChoudhari/Ember/internal/ember/queue"
 )
 
 var (
@@ -56,16 +57,22 @@ func (principal OperatorPrincipal) validate() error {
 }
 
 type Operator struct {
-	resources     ResourceControlPlane
-	blobs         persistence.BlobStore
-	operations    ResourceOperationControlPlane
-	reset         func(context.Context) error
-	deployment    DeploymentControlPlane
-	workloads     WorkloadControlPlane
-	networks      NetworkControlPlane
-	observability RuntimeObservability
-	applyProgress persistence.ApplyProgressStore
-	tenants       *persistence.TenantStore
+	resources         ResourceControlPlane
+	blobs             persistence.BlobStore
+	operations        ResourceOperationControlPlane
+	reset             func(context.Context) error
+	deployment        DeploymentControlPlane
+	workloads         WorkloadControlPlane
+	networks          NetworkControlPlane
+	observability     RuntimeObservability
+	eventBroker       *events.TopicBroker
+	eventDeadLetters  queue.DeadLetterStore
+	eventMetrics      *events.Metrics
+	eventTopologyPath string
+	eventPersistMu    sync.Mutex
+	workQueue         *queue.FileQueue
+	applyProgress     persistence.ApplyProgressStore
+	tenants           *persistence.TenantStore
 
 	tenantResourcesMu sync.Mutex
 	tenantResources   map[string]*ResourceManager
@@ -186,6 +193,19 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	if err != nil {
 		return nil, err
 	}
+	eventBroker, err := events.NewTopicBroker(events.TopicBrokerOptions{MaxTopics: events.MaxTopicCount, MaxSubscriptions: events.MaxSubscriptionCount})
+	if err != nil {
+		return nil, err
+	}
+	eventDeadLetters, err := queue.NewFileDeadLetterStore(filepath.Join(root, "event-dead-letters.json"), queue.DeadLetterStoreOptions{})
+	if err != nil {
+		return nil, err
+	}
+	eventMetrics := events.NewMetrics()
+	workQueue, err := queue.NewFileQueue(filepath.Join(root, "work-queue.json"), queue.QueueOptions{})
+	if err != nil {
+		return nil, err
+	}
 	networkManager, err := NewNetworkManager(networkStore)
 	if err != nil {
 		return nil, err
@@ -234,12 +254,20 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 	if err != nil {
 		return nil, err
 	}
-	observability, err := NewObservabilityManager(workloads, events.NewMetrics())
+	observability, err := NewObservabilityManager(workloads, eventMetrics)
 	if err != nil {
 		return nil, err
 	}
 	operator, err := newOperatorWithRuntimeAndNetwork(resourceManager, blobStore, coordinator, reset, nil, workloads, observability, networkManager)
 	if err != nil {
+		return nil, err
+	}
+	operator.eventBroker = eventBroker
+	operator.eventDeadLetters = eventDeadLetters
+	operator.eventMetrics = eventMetrics
+	operator.workQueue = workQueue
+	operator.eventTopologyPath = filepath.Join(root, "event-topology.json")
+	if err := operator.loadEventTopology(); err != nil {
 		return nil, err
 	}
 	operator.applyProgress = progressStore

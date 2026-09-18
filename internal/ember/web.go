@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -14,8 +15,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SujalChoudhari/Ember/internal/ember/events"
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 	"github.com/SujalChoudhari/Ember/internal/ember/persistence"
+	"github.com/SujalChoudhari/Ember/internal/ember/queue"
 )
 
 //go:embed web_assets.html web_assets.css
@@ -32,30 +35,61 @@ type webHandler struct {
 }
 
 type webPage struct {
-	View        string
-	Title       string
-	Tenant      *models.Tenant
-	Tenants     []models.Tenant
-	TenantID    string
-	Resources   []models.Resource
-	Resource    *models.Resource
-	Children    []models.Resource
-	ParentScope string
-	Operations  []models.Operation
-	Audit       []models.AuditEntry
-	Error       string
+	BasePath      string
+	View          string
+	Section       string
+	Title         string
+	Tenant        *models.Tenant
+	Tenants       []models.Tenant
+	TenantID      string
+	SelectedScope string
+	Resources     []models.Resource
+	Resource      *models.Resource
+	Children      []models.Resource
+	ParentScope   string
+	Lock          *models.ResourceLock
+	Operations    []models.Operation
+	Audit         []models.AuditEntry
+	Objects       []models.BlobObject
+	ObjectBytes   int64
+	Workloads     []webWorkload
+	Networks      []models.Network
+	Ports         []models.NetworkPort
+	Endpoints     []models.NetworkEndpoint
+	ApplyProgress []models.ApplyProgressRecord
+	Recoveries    []models.RecoveryRecord
+	Topics        []events.Topic
+	Subscriptions []events.Subscription
+	DeadLetters   []queue.DeadLetterRecord
+	QueueStatus   string
+	Metrics       events.MetricsSnapshot
+	EventRuntime  string
+	Notice        string
+	Error         string
+}
+
+type webWorkload struct {
+	View    *WorkloadView
+	Logs    []models.WorkloadLog
+	Volumes []models.WorkloadVolume
 }
 
 func NewWebHandler(operator *Operator) http.Handler {
 	return &webHandler{
 		operator: operator,
 		templates: template.Must(template.New("page").Funcs(template.FuncMap{
-			"resourceURL":       webResourceURL,
-			"resourceDeleteURL": webResourceDeleteURL,
-			"resourceTagsURL":   webResourceTagsURL,
-			"tenantURL":         webTenantURL,
-			"tagsValue":         webTagsValue,
-			"formatTime":        webFormatTime,
+			"baseURL":                 webURL,
+			"resourceURL":             webResourceURL,
+			"resourceDeleteURL":       webResourceDeleteURL,
+			"resourceTagsURL":         webResourceTagsURL,
+			"resourceObjectsURL":      webResourceObjectsURL,
+			"resourceObjectURL":       webResourceObjectURL,
+			"resourceDeleteObjectURL": webResourceDeleteObjectURL,
+			"tenantURL":               webTenantURL,
+			"controlURL":              webControlURL,
+			"tagsValue":               webTagsValue,
+			"formatTime":              webFormatTime,
+			"formatBytes":             webFormatBytes,
 		}).ParseFS(webAssets, "web_assets.html")),
 	}
 }
@@ -136,6 +170,8 @@ func (handler *webHandler) ServeHTTP(writer http.ResponseWriter, request *http.R
 	switch segments[0] {
 	case "":
 		handler.platform(writer, request, segments)
+	case "control":
+		handler.control(writer, request, segments)
 	case "tenants":
 		if len(segments) == 1 && request.Method == http.MethodPost {
 			handler.createTenant(writer, request)
@@ -203,7 +239,7 @@ func (handler *webHandler) createTenant(writer http.ResponseWriter, request *htt
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
-	handler.redirect(writer, webTenantURL(tenant.ID))
+	handler.redirect(writer, request, webTenantURL(webBasePath(request), tenant.ID))
 }
 
 func (handler *webHandler) tenant(writer http.ResponseWriter, request *http.Request, segments []string) {
@@ -233,10 +269,16 @@ func (handler *webHandler) tenant(writer http.ResponseWriter, request *http.Requ
 		} else {
 			handler.methodNotAllowed(writer, request, http.MethodGet+", "+http.MethodPost)
 		}
+	case len(segments) == 5 && segments[2] == "resources" && segments[4] == "objects" && request.Method == http.MethodPost:
+		handler.uploadBlob(writer, request, tenantID, segments[3])
+	case len(segments) == 6 && segments[2] == "resources" && segments[4] == "objects" && segments[5] == "delete" && request.Method == http.MethodPost:
+		handler.deleteBlob(writer, request, tenantID, segments[3])
 	case len(segments) == 5 && segments[2] == "resources" && segments[4] == "delete" && request.Method == http.MethodPost:
 		handler.deleteResource(writer, request, tenantID, segments[3])
 	case len(segments) == 5 && segments[2] == "resources" && segments[4] == "tags" && request.Method == http.MethodPost:
 		handler.updateTags(writer, request, tenantID, segments[3])
+	case len(segments) == 6 && segments[2] == "resources" && segments[4] == "lock" && request.Method == http.MethodPost:
+		handler.resourceLockAction(writer, request, tenantID, segments[3], segments[5])
 	default:
 		handler.renderError(writer, request, http.StatusNotFound, errors.New("tenant page not found"))
 	}
@@ -277,7 +319,7 @@ func (handler *webHandler) deleteTenant(writer http.ResponseWriter, request *htt
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
-	handler.redirect(writer, "/")
+	handler.redirect(writer, request, webURL(webBasePath(request), "/"))
 }
 
 func (handler *webHandler) platformResource(writer http.ResponseWriter, request *http.Request, segments []string) {
@@ -301,12 +343,24 @@ func (handler *webHandler) platformResource(writer http.ResponseWriter, request 
 		}
 		return
 	}
+	if len(segments) == 3 && segments[2] == "objects" && request.Method == http.MethodPost {
+		handler.uploadBlob(writer, request, "", segments[1])
+		return
+	}
+	if len(segments) == 4 && segments[2] == "objects" && segments[3] == "delete" && request.Method == http.MethodPost {
+		handler.deleteBlob(writer, request, "", segments[1])
+		return
+	}
 	if len(segments) == 3 && segments[2] == "delete" && request.Method == http.MethodPost {
 		handler.deleteResource(writer, request, "", segments[1])
 		return
 	}
 	if len(segments) == 3 && segments[2] == "tags" && request.Method == http.MethodPost {
 		handler.updateTags(writer, request, "", segments[1])
+		return
+	}
+	if len(segments) == 4 && segments[2] == "lock" && request.Method == http.MethodPost {
+		handler.resourceLockAction(writer, request, "", segments[1], segments[3])
 		return
 	}
 	handler.renderError(writer, request, http.StatusNotFound, errors.New("resource page not found"))
@@ -317,6 +371,29 @@ func (handler *webHandler) resourcePage(writer http.ResponseWriter, request *htt
 	resource, err := handler.operator.GetResource(request.Context(), principal, resourceID)
 	if err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
+	var objects []models.BlobObject
+	var objectBytes int64
+	if resource.Spec.Type == models.ResourceTypeBucket {
+		bucketPrincipal := OperatorPrincipal{TenantID: tenantID, ScopeID: resource.Spec.ParentID}
+		if objectKey := request.URL.Query().Get("object"); objectKey != "" {
+			handler.downloadBlob(writer, request, tenantID, resourceID, bucketPrincipal, objectKey)
+			return
+		}
+		response, listErr := handler.operator.ListBlobs(request.Context(), bucketPrincipal, resourceID, persistence.MaxBlobListLimit)
+		if listErr != nil {
+			handler.renderError(writer, request, webStatus(listErr), listErr)
+			return
+		}
+		objects = response.Objects
+		for _, object := range objects {
+			objectBytes += object.Size
+		}
+	}
+	lock, lockErr := handler.operator.InspectResourceLock(request.Context(), principal, resourceID)
+	if lockErr != nil && !errors.Is(lockErr, persistence.ErrResourceLockNotHeld) {
+		handler.renderError(writer, request, webStatus(lockErr), lockErr)
 		return
 	}
 	children, err := handler.operator.ListResources(request.Context(), OperatorPrincipal{TenantID: tenantID, ScopeID: resource.ID}, persistence.MaxResourceListLimit)
@@ -352,8 +429,9 @@ func (handler *webHandler) resourcePage(writer http.ResponseWriter, request *htt
 	}
 	handler.render(writer, request, http.StatusOK, webPage{
 		View: "resource", Title: resource.Spec.Name, Tenant: tenant, Tenants: tenants,
-		TenantID: tenantID, Resource: resource, Children: children, ParentScope: principal.ScopeID,
-		Operations: operations, Audit: audit,
+		TenantID: tenantID, Resource: resource, Children: children, ParentScope: principal.ScopeID, Lock: lock,
+		Operations: operations, Audit: audit, Objects: objects, ObjectBytes: objectBytes,
+		Notice: webNotice(request),
 	})
 }
 
@@ -377,18 +455,18 @@ func (handler *webHandler) createResource(writer http.ResponseWriter, request *h
 		return
 	}
 	if tenantID == "" {
-		handler.redirect(writer, "/")
+		handler.redirect(writer, request, webURL(webBasePath(request), "/"))
 		return
 	}
 	if parentID == "" {
 		if tenantID == "" {
-			handler.redirect(writer, "/")
+			handler.redirect(writer, request, webURL(webBasePath(request), "/"))
 		} else {
-			handler.redirect(writer, webTenantURL(tenantID))
+			handler.redirect(writer, request, webTenantURL(webBasePath(request), tenantID))
 		}
 		return
 	}
-	handler.redirect(writer, webResourceURL(tenantID, resource.ID, resourceParentScope(parentID)))
+	handler.redirect(writer, request, webResourceURL(webBasePath(request), tenantID, resource.ID, resourceParentScope(parentID)))
 }
 
 func webResourceSpec(request *http.Request, parentID string) (models.ResourceSpec, error) {
@@ -421,10 +499,10 @@ func (handler *webHandler) deleteResource(writer http.ResponseWriter, request *h
 		return
 	}
 	if tenantID == "" {
-		handler.redirect(writer, "/")
+		handler.redirect(writer, request, webURL(webBasePath(request), "/"))
 		return
 	}
-	handler.redirect(writer, webTenantURL(tenantID))
+	handler.redirect(writer, request, webTenantURL(webBasePath(request), tenantID))
 }
 
 func (handler *webHandler) updateTags(writer http.ResponseWriter, request *http.Request, tenantID, resourceID string) {
@@ -443,7 +521,67 @@ func (handler *webHandler) updateTags(writer http.ResponseWriter, request *http.
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
-	handler.redirect(writer, webResourceURL(tenantID, resourceID, principal.ScopeID))
+	handler.redirect(writer, request, webResourceURL(webBasePath(request), tenantID, resourceID, principal.ScopeID))
+}
+
+func (handler *webHandler) uploadBlob(writer http.ResponseWriter, request *http.Request, tenantID, bucketID string) {
+	if err := request.ParseMultipartForm(1 << 20); err != nil {
+		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
+		return
+	}
+	objectKey := strings.TrimSpace(request.FormValue("objectKey"))
+	file, _, err := request.FormFile("contentFile")
+	if err != nil {
+		handler.renderError(writer, request, http.StatusBadRequest, errors.New("an object file is required"))
+		return
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, models.MaxBlobObjectSize+1))
+	if err != nil {
+		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
+		return
+	}
+	if int64(len(content)) > models.MaxBlobObjectSize {
+		handler.renderError(writer, request, http.StatusRequestEntityTooLarge, errors.New("object exceeds the 10 MiB limit"))
+		return
+	}
+	principal := OperatorPrincipal{TenantID: tenantID, ScopeID: request.URL.Query().Get("scope")}
+	if _, err := handler.operator.PutBlob(request.Context(), principal, bucketID, objectKey, content); err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
+	handler.redirect(writer, request, webResourceNoticeURL(webBasePath(request), tenantID, bucketID, principal.ScopeID, "uploaded", objectKey))
+}
+
+func (handler *webHandler) downloadBlob(writer http.ResponseWriter, request *http.Request, tenantID, bucketID string, principal OperatorPrincipal, objectKey string) {
+	response, err := handler.operator.GetBlob(request.Context(), principal, bucketID, objectKey)
+	if err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/octet-stream")
+	writer.Header().Set("Content-Disposition", "attachment; filename=\"blob\"")
+	writer.Header().Set("Cache-Control", "private, no-store")
+	writer.Header().Set("Content-Length", strconv.Itoa(len(response.Content)))
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(response.Content)
+}
+
+func (handler *webHandler) deleteBlob(writer http.ResponseWriter, request *http.Request, tenantID, bucketID string) {
+	if err := request.ParseForm(); err != nil {
+		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
+		return
+	}
+	if !webConfirmed(request) {
+		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
+		return
+	}
+	principal := OperatorPrincipal{TenantID: tenantID, ScopeID: request.URL.Query().Get("scope")}
+	if err := handler.operator.DeleteBlob(request.Context(), principal, bucketID, request.FormValue("objectKey")); err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
+	handler.redirect(writer, request, webResourceNoticeURL(webBasePath(request), tenantID, bucketID, principal.ScopeID, "deleted", request.FormValue("objectKey")))
 }
 
 func webParseTags(value string) (map[string]string, error) {
@@ -467,7 +605,23 @@ func webConfirmed(request *http.Request) bool {
 	return err == nil && confirmed
 }
 
+func webNotice(request *http.Request) string {
+	status := request.URL.Query().Get("status")
+	objectKey := request.URL.Query().Get("noticeObject")
+	switch status {
+	case "uploaded":
+		return fmt.Sprintf("Object %q uploaded.", objectKey)
+	case "deleted":
+		return fmt.Sprintf("Object %q deleted.", objectKey)
+	case "control":
+		return objectKey
+	default:
+		return ""
+	}
+}
+
 func (handler *webHandler) render(writer http.ResponseWriter, request *http.Request, status int, page webPage) {
+	page.BasePath = webBasePath(request)
 	if page.Title == "" {
 		page.Title = "Ember management"
 	}
@@ -490,7 +644,7 @@ func (handler *webHandler) renderError(writer http.ResponseWriter, request *http
 	handler.render(writer, request, status, webPage{Title: "Request error", Error: err.Error()})
 }
 
-func (handler *webHandler) redirect(writer http.ResponseWriter, location string) {
+func (handler *webHandler) redirect(writer http.ResponseWriter, request *http.Request, location string) {
 	writer.Header().Set("Location", location)
 	writer.WriteHeader(http.StatusSeeOther)
 }
@@ -513,7 +667,7 @@ func webStatus(err error) int {
 	if errors.Is(err, persistence.ErrTenantNotFound) || errors.Is(err, persistence.ErrResourceNotFound) {
 		return http.StatusNotFound
 	}
-	if errors.Is(err, persistence.ErrInvalidTenant) || errors.Is(err, persistence.ErrInvalidTenantListLimit) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) {
+	if errors.Is(err, persistence.ErrInvalidTenant) || errors.Is(err, persistence.ErrInvalidTenantListLimit) || errors.Is(err, persistence.ErrInvalidScope) || errors.Is(err, models.ErrInvalidResourceSpec) || errors.Is(err, models.ErrInvalidResource) || errors.Is(err, ErrOperatorBucketRequired) || errors.Is(err, models.ErrInvalidBlobObjectKey) || errors.Is(err, persistence.ErrBlobObjectTooLarge) || errors.Is(err, persistence.ErrBlobQuotaExceeded) {
 		return http.StatusBadRequest
 	}
 	status := operatorErrorStatus(err)
@@ -523,14 +677,35 @@ func webStatus(err error) int {
 	return http.StatusInternalServerError
 }
 
-func webTenantURL(tenantID string) string {
-	return "/tenants/" + url.PathEscape(tenantID)
+func webBasePath(request *http.Request) string {
+	if request == nil {
+		return ""
+	}
+	prefix := strings.TrimSpace(request.Header.Get("X-Forwarded-Prefix"))
+	if prefix == "" || !strings.HasPrefix(prefix, "/") || strings.Contains(prefix, "//") {
+		return ""
+	}
+	return "/" + strings.Trim(prefix, "/")
 }
 
-func webResourceURL(tenantID, resourceID, scope string) string {
-	base := "/resources/" + url.PathEscape(resourceID)
+func webURL(basePath, path string) string {
+	if basePath == "" {
+		return path
+	}
+	if path == "/" {
+		return basePath + "/"
+	}
+	return basePath + path
+}
+
+func webTenantURL(basePath, tenantID string) string {
+	return webURL(basePath, "/tenants/"+url.PathEscape(tenantID))
+}
+
+func webResourceURL(basePath, tenantID, resourceID, scope string) string {
+	base := webURL(basePath, "/resources/"+url.PathEscape(resourceID))
 	if tenantID != "" {
-		base = webTenantURL(tenantID) + "/resources/" + url.PathEscape(resourceID)
+		base = webTenantURL(basePath, tenantID) + "/resources/" + url.PathEscape(resourceID)
 	}
 	if scope != "" {
 		base += "?scope=" + url.QueryEscape(scope)
@@ -538,21 +713,47 @@ func webResourceURL(tenantID, resourceID, scope string) string {
 	return base
 }
 
-func webResourceDeleteURL(tenantID, resourceID, scope string) string {
-	base := webResourcePath(tenantID, resourceID) + "/delete"
+func webResourceDeleteURL(basePath, tenantID, resourceID, scope string) string {
+	base := webResourcePath(basePath, tenantID, resourceID) + "/delete"
 	return webWithScope(base, scope)
 }
 
-func webResourceTagsURL(tenantID, resourceID, scope string) string {
-	base := webResourcePath(tenantID, resourceID) + "/tags"
+func webResourceTagsURL(basePath, tenantID, resourceID, scope string) string {
+	base := webResourcePath(basePath, tenantID, resourceID) + "/tags"
 	return webWithScope(base, scope)
 }
 
-func webResourcePath(tenantID, resourceID string) string {
-	if tenantID == "" {
-		return "/resources/" + url.PathEscape(resourceID)
+func webResourceObjectsURL(basePath, tenantID, resourceID, scope string) string {
+	base := webResourcePath(basePath, tenantID, resourceID) + "/objects"
+	return webWithScope(base, scope)
+}
+
+func webResourceDeleteObjectURL(basePath, tenantID, resourceID, scope string) string {
+	base := webResourcePath(basePath, tenantID, resourceID) + "/objects/delete"
+	return webWithScope(base, scope)
+}
+
+func webResourceObjectURL(basePath, tenantID, resourceID, scope, objectKey string) string {
+	values := url.Values{"object": {objectKey}}
+	if scope != "" {
+		values.Set("scope", scope)
 	}
-	return webTenantURL(tenantID) + "/resources/" + url.PathEscape(resourceID)
+	return webResourcePath(basePath, tenantID, resourceID) + "?" + values.Encode()
+}
+
+func webResourceNoticeURL(basePath, tenantID, resourceID, scope, status, objectKey string) string {
+	values := url.Values{"status": {status}, "noticeObject": {objectKey}}
+	if scope != "" {
+		values.Set("scope", scope)
+	}
+	return webResourcePath(basePath, tenantID, resourceID) + "?" + values.Encode()
+}
+
+func webResourcePath(basePath, tenantID, resourceID string) string {
+	if tenantID == "" {
+		return webURL(basePath, "/resources/"+url.PathEscape(resourceID))
+	}
+	return webTenantURL(basePath, tenantID) + "/resources/" + url.PathEscape(resourceID)
 }
 
 func webWithScope(base, scope string) string {
@@ -591,4 +792,19 @@ func webFormatTime(value time.Time) string {
 		return "-"
 	}
 	return value.UTC().Format("2006-01-02 15:04:05Z")
+}
+
+func webFormatBytes(value int64) string {
+	if value < 1024 {
+		return fmt.Sprintf("%d B", value)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	amount := float64(value)
+	for _, unit := range units {
+		amount /= 1024
+		if amount < 1024 || unit == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", amount, unit)
+		}
+	}
+	return fmt.Sprintf("%d B", value)
 }

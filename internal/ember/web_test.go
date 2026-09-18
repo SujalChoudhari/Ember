@@ -1,7 +1,9 @@
 package ember
 
 import (
+	"bytes"
 	"context"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -80,6 +82,86 @@ func TestWebManagementFlowKeepsPlatformAndTenantResourcesSeparate(t *testing.T) 
 	resourcePage = webRequest(t, handler, http.MethodGet, "/tenants/alpha/resources/"+tenantResources[0].ID, nil)
 	if resourcePage.Code != http.StatusOK || !strings.Contains(resourcePage.Body.String(), "resource.update.tags") || !strings.Contains(resourcePage.Body.String(), "succeeded") {
 		t.Fatalf("tenant resource trace page = %d %q, want operation outcome", resourcePage.Code, resourcePage.Body.String())
+	}
+}
+
+func TestWebBucketStoreUploadsListsAndDownloadsObjects(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	groupResponse := webForm(t, handler, http.MethodPost, "/resources", url.Values{
+		"type": {"group"}, "name": {"content"},
+	})
+	if groupResponse.Code != http.StatusSeeOther {
+		t.Fatalf("create group = %d %q, want redirect", groupResponse.Code, groupResponse.Body.String())
+	}
+	groups, err := operator.ListResources(context.Background(), OperatorPrincipal{}, 10)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("ListResources(groups) = %#v, %v, want one group", groups, err)
+	}
+
+	bucketResponse := webForm(t, handler, http.MethodPost, "/resources", url.Values{
+		"type": {"bucket"}, "name": {"assets"}, "parentID": {groups[0].ID},
+	})
+	if bucketResponse.Code != http.StatusSeeOther {
+		t.Fatalf("create bucket = %d %q, want redirect", bucketResponse.Code, bucketResponse.Body.String())
+	}
+	buckets, err := operator.ListResources(context.Background(), OperatorPrincipal{ScopeID: groups[0].ID}, 10)
+	if err != nil || len(buckets) != 1 {
+		t.Fatalf("ListResources(buckets) = %#v, %v, want one bucket", buckets, err)
+	}
+
+	var body bytes.Buffer
+	multipartWriter := multipart.NewWriter(&body)
+	if err := multipartWriter.WriteField("objectKey", "hello.txt"); err != nil {
+		t.Fatalf("WriteField() error = %v", err)
+	}
+	part, err := multipartWriter.CreateFormFile("contentFile", "hello.txt")
+	if err != nil {
+		t.Fatalf("CreateFormFile() error = %v", err)
+	}
+	if _, err := part.Write([]byte("hello from Ember")); err != nil {
+		t.Fatalf("part.Write() error = %v", err)
+	}
+	if err := multipartWriter.Close(); err != nil {
+		t.Fatalf("multipartWriter.Close() error = %v", err)
+	}
+	uploadRequest := httptest.NewRequest(http.MethodPost, "/resources/"+url.PathEscape(buckets[0].ID)+"/objects?scope="+url.QueryEscape(groups[0].ID), &body)
+	uploadRequest.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	uploadResponse := httptest.NewRecorder()
+	handler.ServeHTTP(uploadResponse, uploadRequest)
+	if uploadResponse.Code != http.StatusSeeOther {
+		t.Fatalf("upload object = %d %q, want redirect", uploadResponse.Code, uploadResponse.Body.String())
+	}
+	if !strings.Contains(uploadResponse.Header().Get("Location"), "status=uploaded") {
+		t.Fatalf("upload location = %q, want success status", uploadResponse.Header().Get("Location"))
+	}
+	uploadNotice := webRequest(t, handler, http.MethodGet, uploadResponse.Header().Get("Location"), nil)
+	if uploadNotice.Code != http.StatusOK || !strings.Contains(uploadNotice.Body.String(), "uploaded.") {
+		t.Fatalf("upload notice = %d %q, want success notice", uploadNotice.Code, uploadNotice.Body.String())
+	}
+
+	bucketPage := webRequest(t, handler, http.MethodGet, "/resources/"+url.PathEscape(buckets[0].ID)+"?scope="+url.QueryEscape(groups[0].ID), nil)
+	if bucketPage.Code != http.StatusOK || !strings.Contains(bucketPage.Body.String(), "Bucket contents") || !strings.Contains(bucketPage.Body.String(), "hello.txt") {
+		t.Fatalf("bucket page = %d %q, want object store listing", bucketPage.Code, bucketPage.Body.String())
+	}
+	download := webRequest(t, handler, http.MethodGet, "/resources/"+url.PathEscape(buckets[0].ID)+"?scope="+url.QueryEscape(groups[0].ID)+"&object=hello.txt", nil)
+	if download.Code != http.StatusOK || download.Body.String() != "hello from Ember" {
+		t.Fatalf("download = %d %q, want uploaded object", download.Code, download.Body.String())
+	}
+	deleted := webForm(t, handler, http.MethodPost, "/resources/"+url.PathEscape(buckets[0].ID)+"/objects/delete?scope="+url.QueryEscape(groups[0].ID), url.Values{
+		"objectKey": {"hello.txt"}, "confirm": {"true"},
+	})
+	if deleted.Code != http.StatusSeeOther || !strings.Contains(deleted.Header().Get("Location"), "status=deleted") {
+		t.Fatalf("delete object = %d location %q, want success redirect", deleted.Code, deleted.Header().Get("Location"))
+	}
+	deleteNotice := webRequest(t, handler, http.MethodGet, deleted.Header().Get("Location"), nil)
+	if deleteNotice.Code != http.StatusOK || !strings.Contains(deleteNotice.Body.String(), "deleted.") || !strings.Contains(deleteNotice.Body.String(), "No objects yet") {
+		t.Fatalf("delete notice = %d %q, want deletion feedback without object row", deleteNotice.Code, deleteNotice.Body.String())
 	}
 }
 

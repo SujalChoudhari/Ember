@@ -18,6 +18,13 @@ var (
 	ErrOperatorDeploymentApply    = errors.New("operator deployment apply unavailable")
 )
 
+func (operator *Operator) PlanDeployment(ctx context.Context, principal OperatorPrincipal, data []byte, supplied map[string]string) (deployment.Resolution, deployment.DeploymentPlan, error) {
+	return operator.planDeployment(ctx, principal, data, supplied)
+}
+
+func (operator *Operator) ApplyDeployment(ctx context.Context, principal OperatorPrincipal, data []byte, supplied map[string]string, options deployment.ApplyOptions) (*deployment.ApplyResult, deployment.Resolution, error) {
+	return operator.applyDeployment(ctx, principal, data, supplied, options)
+}
 func (operator *Operator) planDeployment(ctx context.Context, principal OperatorPrincipal, data []byte, supplied map[string]string) (deployment.Resolution, deployment.DeploymentPlan, error) {
 	if operator == nil || ctx == nil {
 		return deployment.Resolution{}, deployment.DeploymentPlan{}, ErrOperatorDeploymentPlanning
