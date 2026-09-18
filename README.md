@@ -2,7 +2,9 @@
 
 Ember is a private, local-first, single-node Azure-like platform. The command
 line binary stores bounded state below the directory passed with
-`--state-dir` (or `.ember-state` by default).
+`--state-dir` (or `.ember-state` by default). Platform resources and the tenant
+registry live in `platform.db`; each tenant has an isolated
+`tenants/<tenant-id>/tenant.db` database.
 
 ## Requirements
 
@@ -15,6 +17,7 @@ No network service, cloud account, or external runtime is required.
 ## Documentation
 
 Start with the [golden clean-machine quickstart](#golden-clean-machine-lifecycle),
+the [tenant/resource release evidence](docs/tenant-resource-release-evidence.md),
 or use the [documentation index](docs/index.md) for the learner and contributor
 navigation. The index separates implemented behavior from planned work and
 non-goals.
@@ -53,6 +56,30 @@ ember --state-dir /path/to/state reset --confirm
 ```
 
 Reset is intentionally confirmation-gated and removes only Ember-owned state.
+
+## Tenant and resource management
+
+The local management slice supports platform-root resources plus isolated tenant
+resources:
+
+```text
+ember --state-dir /tmp/ember-state tenant create --id alpha --name Alpha
+ember --state-dir /tmp/ember-state tenant create --id beta --name Beta
+ember --state-dir /tmp/ember-state resource create --tenant alpha --type group --name shared
+ember --state-dir /tmp/ember-state resource list --tenant alpha --limit 10
+```
+
+The standard-library management page is available only on an explicit loopback
+address:
+
+```text
+ember --state-dir /tmp/ember-state --listen 127.0.0.1:8080 serve
+```
+
+Tenant and resource deletion remains confirmation-gated. The complete clean
+machine, restart, backup-boundary, SQLite, and web evidence is documented in
+[`docs/tenant-resource-release-evidence.md`](docs/tenant-resource-release-evidence.md)
+and runs through `./scripts/ember-release-evidence.sh`.
 
 ## Event handling
 
