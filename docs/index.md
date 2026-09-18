@@ -26,6 +26,7 @@ repository workflows rather than maintaining a second contract.
 - **Azure-shaped compatibility:** [Compatibility matrix](azure-shaped-compatibility.md)
 - **Deployment and recovery:** [Deployment, recovery, and release guide](deployment-and-recovery.md)
 - **Upgrade and release evidence:** [Sprint 2 release evidence](sprint-2-release-evidence.md)
+- **Tenant/resource release gate:** [Tenant and resource release evidence](tenant-resource-release-evidence.md)
 - **Sprint 2 closeout:** [Three-day closeout receipt](sprint-2-closeout.md)
 - **Resource and Blob evidence:** [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
 - **Queue and event evidence:** [Sprint 2 queue and event evidence](sprint-2-queue-event-evidence.md)
@@ -39,6 +40,9 @@ repository workflows rather than maintaining a second contract.
 - Local-first, single-node operation with bounded state under `--state-dir`.
 - Resource creation and inspection, including the resource → bucket hierarchy
   used by the smoke path.
+- Platform tenant registration, per-tenant SQLite resource isolation, restart
+  persistence, and confirmation-gated local management UI behavior through the
+  [tenant/resource release evidence](tenant-resource-release-evidence.md) gate.
 - Blob write and read through the CLI smoke path.
 - Reproducible Go tests, platform-labelled packaging, checksum verification
   during installation, and confirmation-gated reset.
