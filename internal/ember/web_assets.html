@@ -5,20 +5,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}} · Ember</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="{{baseURL .BasePath "/static/style.css"}}">
 </head>
 <body>
   <header class="site-header">
     <div class="shell header-row">
-      <a class="brand" href="/">Ember management</a>
+      <a class="brand" href="{{baseURL .BasePath "/"}}">Ember management</a>
       <nav aria-label="Primary navigation">
-        <a href="/">Platform</a>
-        {{range .Tenants}}<a href="{{tenantURL .ID}}">{{.DisplayName}}</a>{{end}}
+        <a href="{{baseURL .BasePath "/"}}">Platform</a>
+        <a href="{{controlURL .BasePath "" "" "overview"}}">Control center</a>
+        {{range .Tenants}}<a href="{{tenantURL $.BasePath .ID}}">{{.DisplayName}}</a>{{end}}
       </nav>
     </div>
   </header>
   <main class="shell">
     {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
+    {{if .Notice}}<div class="notice success" role="status">{{.Notice}}</div>{{end}}
     {{if eq .View "platform"}}
       <section class="hero">
         <p class="eyebrow">Local-first control plane</p>
@@ -28,7 +30,7 @@
       <div class="grid two-column">
         <section class="card">
           <h2>Register a tenant</h2>
-          <form method="post" action="/tenants" class="stack">
+          <form method="post" action="{{baseURL .BasePath "/tenants"}}" class="stack">
             <label>Tenant ID <input name="id" required maxlength="64" pattern="[A-Za-z][A-Za-z0-9_-]*"></label>
             <label>Display name <input name="displayName" required maxlength="128"></label>
             <button type="submit">Create tenant</button>
@@ -48,7 +50,7 @@
         {{if .Tenants}}
         <div class="list-grid">
           {{range .Tenants}}
-          <article class="list-item"><div><h3><a href="{{tenantURL .ID}}">{{.DisplayName}}</a></h3><p class="muted"><code>{{.ID}}</code> · created {{formatTime .CreatedAt}}</p></div><a class="button secondary" href="{{tenantURL .ID}}">Open</a></article>
+          <article class="list-item"><div><h3><a href="{{tenantURL $.BasePath .ID}}">{{.DisplayName}}</a></h3><p class="muted"><code>{{.ID}}</code> · created {{formatTime .CreatedAt}}</p></div><a class="button secondary" href="{{tenantURL $.BasePath .ID}}">Open</a></article>
           {{end}}
         </div>
         {{else}}<p class="muted">No tenants are registered yet.</p>{{end}}
@@ -67,7 +69,7 @@
         <section class="card warning-card">
           <h2>Delete tenant</h2>
           <p class="muted">This removes the tenant database and all resources after explicit confirmation.</p>
-          <form method="post" action="{{tenantURL .Tenant.ID}}/delete" class="stack">
+          <form method="post" action="{{tenantURL .BasePath .Tenant.ID}}/delete" class="stack">
             <label class="checkbox"><input type="checkbox" name="confirm" value="true" required> I understand this is destructive.</label>
             <button class="danger" type="submit">Delete tenant</button>
           </form>
@@ -77,48 +79,92 @@
         <div class="section-heading"><div><p class="eyebrow">Tenant scope</p><h2>Resources</h2></div><span class="badge">{{len .Resources}} shown</span></div>
         {{template "resource-list" .}}
       </section>
-    {{else if eq .View "resource"}}
-      <section class="hero">
-        <p class="eyebrow">{{if .TenantID}}Tenant resource{{else}}Platform resource{{end}}</p>
-        <h1>{{.Resource.Spec.Name}}</h1>
-        <p><code>{{.Resource.ID}}</code> · {{.Resource.Spec.Type}} · desired <strong>{{.Resource.Spec.DesiredState}}</strong> · observed <strong>{{.Resource.ObservedState}}</strong></p>
-      </section>
-      <div class="grid two-column">
-        <section class="card">
-          <h2>Update tags</h2>
-          <p class="muted">Use comma-separated <code>key=value</code> pairs. The update records an operation and audit entry.</p>
-          <form method="post" action="{{resourceTagsURL .TenantID .Resource.ID .ParentScope}}" class="stack">
-            <label>Tags <input name="tags" value="{{tagsValue .Resource.Spec.Tags}}" maxlength="8192"></label>
-            <button type="submit">Save tags</button>
-          </form>
-        </section>
-        <section class="card warning-card">
-          <h2>Delete resource</h2>
-          <p class="muted">Deletion is never performed by GET and requires the confirmation checkbox.</p>
-          <form method="post" action="{{resourceDeleteURL .TenantID .Resource.ID .ParentScope}}" class="stack">
-            <label class="checkbox"><input type="checkbox" name="confirm" value="true" required> I understand this is destructive.</label>
-            <button class="danger" type="submit">Delete resource</button>
-          </form>
-        </section>
-      </div>
-      <section class="card">
-        <div class="section-heading"><div><p class="eyebrow">Child scope</p><h2>Children</h2></div><span class="badge">{{len .Children}} shown</span></div>
-        {{if .Children}}
-        <div class="list-grid">
-          {{range .Children}}
-          <article class="list-item"><div><h3><a href="{{resourceURL $.TenantID .ID .Spec.ParentID}}">{{.Spec.Name}}</a></h3><p class="muted"><code>{{.ID}}</code> · {{.Spec.Type}} · {{.ObservedState}}</p></div><a class="button secondary" href="{{resourceURL $.TenantID .ID .Spec.ParentID}}">Inspect</a></article>
-          {{end}}
+    {{else if eq .View "control"}}
+      <section class="hero"><p class="eyebrow">Operations surface</p><h1>Control center</h1><p>Configure and inspect the capabilities Ember actually runs. Select a tenant and group scope before using scoped controls.</p></section>
+      <div class="control-layout">
+        <aside class="control-nav" aria-label="Control center sections">
+          <p class="section-label">Scope</p>
+          <div class="scope-links">{{range .Tenants}}<a href="{{controlURL $.BasePath .ID $.SelectedScope "overview"}}">{{.DisplayName}}</a>{{end}}</div>
+          <p class="section-label">Group scopes</p>
+          {{if .Resources}}{{range .Resources}}{{if eq .Spec.Type "group"}}<a class="scope-link {{if eq $.SelectedScope .ID}}active{{end}}" href="{{controlURL $.BasePath $.TenantID .ID "overview"}}">{{.Spec.Name}}<code>{{.ID}}</code></a>{{end}}{{end}}{{else}}<p class="muted">Create a group resource to activate scoped controls.</p>{{end}}
+          <nav class="control-sections"><a href="#resources">Resources</a><a href="#workloads">Workloads</a><a href="#networks">Networks</a><a href="#operations">Operations &amp; audit</a><a href="#deployments">Deployments &amp; recovery</a><a href="#events">Events &amp; dead letters</a><a href="#metrics">Metrics</a><a href="#limits">Capabilities</a></nav>
+        </aside>
+        <div class="control-content">
+          <section class="card scope-banner"><strong>Tenant:</strong> {{if .Tenant}}{{.Tenant.DisplayName}}{{else}}platform{{end}} <span>·</span> <strong>Scope:</strong> {{if .SelectedScope}}<code>{{.SelectedScope}}</code>{{else}}root — select a group for networks, workloads, and events{{end}}</span></section>
+          <section class="card" id="resources"><div class="section-heading"><div><p class="eyebrow">Control plane</p><h2>Resources</h2></div><span class="badge">{{len .Resources}} shown</span></div>{{template "resource-list" .}}</section>
+          <section class="card" id="workloads"><div class="section-heading"><div><p class="eyebrow">Compute</p><h2>Workloads</h2></div><span class="badge">{{len .Workloads}} inspected</span></div>{{if .SelectedScope}}<form method="post" action="{{baseURL .BasePath "/control/workload-restart"}}" class="inline-create"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="workloads"><label>Resource ID<input name="resourceID" required placeholder="workload-resource-id"></label><button type="submit">Restart workload</button></form>{{if .Workloads}}<div class="table-wrap"><table><thead><tr><th>Workload</th><th>Health</th><th>Readiness</th><th>Execution</th><th>Actions</th></tr></thead><tbody>{{range .Workloads}}<tr><td><a href="{{resourceURL $.BasePath $.TenantID .View.Resource.ID .View.Resource.Spec.ParentID}}">{{.View.Resource.Spec.Name}}</a><br><code>{{.View.Resource.ID}}</code></td><td>{{.View.Status.Health}}</td><td>{{.View.Status.Readiness}}</td><td><code>{{.View.Status.ExecutionID}}</code></td><td><form method="post" action="{{baseURL $.BasePath "/control/workload-restart"}}" class="inline-form"><input type="hidden" name="tenant" value="{{$.TenantID}}"><input type="hidden" name="scope" value="{{$.SelectedScope}}"><input type="hidden" name="section" value="workloads"><input type="hidden" name="resourceID" value="{{.View.Resource.ID}}"><button class="button secondary" type="submit">Restart</button></form><form method="post" action="{{baseURL $.BasePath "/control/volume"}}" class="inline-form"><input type="hidden" name="tenant" value="{{$.TenantID}}"><input type="hidden" name="scope" value="{{$.SelectedScope}}"><input type="hidden" name="section" value="workloads"><input type="hidden" name="resourceID" value="{{.View.Resource.ID}}"><input name="volumeName" placeholder="volume name" required><input name="path" placeholder="/data" required><input name="maxBytes" type="number" min="1" required><button type="submit">Attach volume</button></form><form method="post" action="{{baseURL $.BasePath "/control/volume-cleanup"}}" class="inline-form"><input type="hidden" name="tenant" value="{{$.TenantID}}"><input type="hidden" name="scope" value="{{$.SelectedScope}}"><input type="hidden" name="section" value="workloads"><input type="hidden" name="resourceID" value="{{.View.Resource.ID}}"><button class="text-danger" type="submit">Cleanup volumes</button></form>{{range .Volumes}}<small>volume {{.Name}} · {{.Path}} · {{.UsedBytes}}/{{.MaxBytes}} bytes</small>{{end}}{{range .Logs}}<small>{{formatTime .Timestamp}} · {{.Stream}} · {{.Message}}</small>{{end}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No workloads in this scope.</p>{{end}}{{else}}<p class="muted">Select a group scope to inspect workloads.</p>{{end}}</section>
+          <section class="card" id="networks"><div class="section-heading"><div><p class="eyebrow">Connectivity</p><h2>Networks, ports, endpoints</h2></div><span class="badge">{{len .Networks}} networks · {{len .Ports}} ports · {{len .Endpoints}} endpoints</span></div>{{if .SelectedScope}}<form method="post" action="{{baseURL .BasePath "/control/networks"}}" class="inline-create"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="networks"><label>Network name<input name="name" required></label><button type="submit">Create network</button></form><div class="table-wrap"><table><thead><tr><th>Networks</th><th>Ports</th><th>Endpoints</th></tr></thead><tbody><tr><td>{{range .Networks}}<div><strong>{{.Name}}</strong><br><code>{{.ID}}</code><form method="post" action="{{baseURL $.BasePath "/control/network-delete"}}" class="inline-form"><input type="hidden" name="tenant" value="{{$.TenantID}}"><input type="hidden" name="scope" value="{{$.SelectedScope}}"><input type="hidden" name="section" value="networks"><input type="hidden" name="networkID" value="{{.ID}}"><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> Confirm</label><button class="text-danger" type="submit">Delete</button></form></div>{{else}}none{{end}}</td><td>{{range .Ports}}<div><code>{{.ID}}</code> · {{.Protocol}}/{{.Number}}<br><small>workload {{.WorkloadID}}</small><form method="post" action="{{baseURL $.BasePath "/control/port-delete"}}" class="inline-form"><input type="hidden" name="tenant" value="{{$.TenantID}}"><input type="hidden" name="scope" value="{{$.SelectedScope}}"><input type="hidden" name="section" value="networks"><input type="hidden" name="networkID" value="{{.NetworkID}}"><input type="hidden" name="portID" value="{{.ID}}"><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> Confirm</label><button class="text-danger" type="submit">Delete</button></form></div>{{else}}none{{end}}</td><td>{{range .Endpoints}}<div><strong>{{.Name}}</strong><br><code>{{.Address}}</code><form method="post" action="{{baseURL $.BasePath "/control/endpoint-delete"}}" class="inline-form"><input type="hidden" name="tenant" value="{{$.TenantID}}"><input type="hidden" name="scope" value="{{$.SelectedScope}}"><input type="hidden" name="section" value="networks"><input type="hidden" name="networkID" value="{{.NetworkID}}"><input type="hidden" name="endpointID" value="{{.ID}}"><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> Confirm</label><button class="text-danger" type="submit">Delete</button></form></div>{{else}}none{{end}}</td></tr></tbody></table></div><div class="form-grid"><form method="post" action="{{baseURL .BasePath "/control/ports"}}" class="stack"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="networks"><h3>Allocate port</h3><label>Network ID<input name="networkID" required></label><label>Workload ID<input name="workloadID" required></label><label>Port number<input name="number" type="number" min="1" max="65535" required></label><label>Protocol<input name="protocol" value="tcp" required></label><button type="submit">Allocate</button></form><form method="post" action="{{baseURL .BasePath "/control/endpoints"}}" class="stack"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="networks"><h3>Publish endpoint</h3><label>Network ID<input name="networkID" required></label><label>Port ID<input name="portID" required></label><label>Endpoint name<input name="name" required></label><button type="submit">Publish</button></form></div>{{else}}<p class="muted">Select a group scope to configure logical networking.</p>{{end}}</section>
+          <section class="card" id="operations"><div class="section-heading"><div><p class="eyebrow">Traceability</p><h2>Operations &amp; audit</h2></div><span class="badge">{{len .Operations}} operations · {{len .Audit}} audit entries</span></div><div class="table-wrap"><table><thead><tr><th>Operation</th><th>Resource</th><th>Status</th><th>Request</th><th>Updated</th></tr></thead><tbody>{{range .Operations}}<tr><td><code>{{.ID}}</code></td><td><code>{{.ResourceID}}</code></td><td>{{.Status}}</td><td><code>{{.RequestID}}</code></td><td>{{formatTime .UpdatedAt}}</td></tr>{{else}}<tr><td colspan="5">No operations recorded.</td></tr>{{end}}</tbody></table></div><div class="table-wrap"><table><thead><tr><th>Audit action</th><th>Resource</th><th>Outcome</th><th>Correlation</th><th>Created</th></tr></thead><tbody>{{range .Audit}}<tr><td>{{.Action}}</td><td><code>{{.ResourceID}}</code></td><td>{{.Outcome}}</td><td><code>{{.CorrelationID}}</code></td><td>{{formatTime .CreatedAt}}</td></tr>{{else}}<tr><td colspan="5">No audit entries recorded.</td></tr>{{end}}</tbody></table></div></section>
+          <section class="card" id="deployments"><div class="section-heading"><div><p class="eyebrow">Apply lifecycle</p><h2>Deployments &amp; recovery</h2></div><span class="badge">{{len .ApplyProgress}} apply records · {{len .Recoveries}} recoveries</span></div><form method="post" action="{{baseURL .BasePath "/control/deployment-apply"}}" class="deployment-form stack"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="deployments"><h3>Apply a deployment document</h3><label>Document<textarea name="document" rows="8" required placeholder='{"version":"v1","resources":[]}'></textarea></label><label>Parameters <textarea name="parameters" rows="3" placeholder="name=value per line"></textarea></label><div class="form-grid compact"><label>Request ID<input name="requestID" maxlength="128" placeholder="generated if empty"></label><label>Correlation ID<input name="correlationID" maxlength="128" placeholder="uses request ID if empty"></label></div><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> Approve the validated plan, including destructive changes.</label><button type="submit">Validate and apply</button></form><div class="table-wrap"><table><thead><tr><th>Apply progress</th><th>Entries</th><th>Recovery</th></tr></thead><tbody>{{range .ApplyProgress}}<tr><td><code>{{.ID}}</code><br>{{.Status}}</td><td>{{len .Entries}}</td><td><form method="post" action="{{baseURL $.BasePath "/control/recover"}}" class="inline-form"><input type="hidden" name="tenant" value="{{$.TenantID}}"><input type="hidden" name="scope" value="{{$.SelectedScope}}"><input type="hidden" name="section" value="deployments"><input type="hidden" name="applyProgressID" value="{{.ID}}"><button type="submit" name="action" value="rollback" class="button secondary">Rollback</button></form></td></tr>{{else}}<tr><td colspan="3">No deployment progress records yet.</td></tr>{{end}}</tbody></table></div>{{if .Recoveries}}<div class="table-wrap"><table><thead><tr><th>Recovery</th><th>Action</th><th>Status</th></tr></thead><tbody>{{range .Recoveries}}<tr><td><code>{{.ID}}</code></td><td>{{.Action}}</td><td>{{.Status}}</td></tr>{{end}}</tbody></table></div>{{end}}</section>
+          <section class="card" id="queue"><div class="section-heading"><div><p class="eyebrow">PERSISTENT DELIVERY</p><h2>Operator queue</h2></div><span class="badge">{{.QueueStatus}}</span></div><p class="muted">This is Ember’s local file-backed queue. Receipts are opaque; payloads are never put into URLs or notices.</p><div class="form-grid three-up"><form method="post" action="{{baseURL .BasePath "/control/queue-enqueue"}}" class="stack"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="queue"><h3>Enqueue</h3><label>Correlation ID<input name="correlationID" required value="portal-message"></label><label>Payload<textarea name="payload" required maxlength="262144"></textarea></label><button type="submit">Enqueue message</button></form><form method="post" action="{{baseURL .BasePath "/control/queue-receive"}}" class="stack"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="queue"><h3>Receive</h3><p class="muted">Receives the oldest visible message and starts its visibility timeout.</p><button type="submit">Receive message</button></form><form method="post" action="{{baseURL .BasePath "/control/queue-ack"}}" class="stack"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="queue"><h3>Acknowledge</h3><label>Receipt<input name="receipt" required autocomplete="off"></label><button type="submit">Acknowledge receipt</button></form></div></section>
+      <section class="card" id="events"><div class="section-heading"><div><p class="eyebrow">Local event runtime</p><h2>Topics, subscriptions &amp; dead letters</h2></div><span class="badge">{{.EventRuntime}}</span></div>{{if .SelectedScope}}<div class="form-grid"><form method="post" action="{{baseURL .BasePath "/control/topics"}}" class="stack"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="events"><h3>Create topic</h3><label>Owner<input name="owner" required></label><label>Name<input name="name" required></label><button type="submit">Create topic</button></form><form method="post" action="{{baseURL .BasePath "/control/subscriptions"}}" class="stack"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="events"><h3>Create subscription</h3><label>Owner<input name="owner" required></label><label>Topic ID<input name="topicID" required></label><label>Name<input name="name" required></label><label>Event type filter<input name="eventType" placeholder="resource.updated"></label><label>Correlation filter<input name="correlationID"></label><button type="submit">Create subscription</button></form><form method="post" action="{{baseURL .BasePath "/control/publish"}}" class="stack"><input type="hidden" name="tenant" value="{{.TenantID}}"><input type="hidden" name="scope" value="{{.SelectedScope}}"><input type="hidden" name="section" value="events"><h3>Publish console probe</h3><label>Owner<input name="owner" required></label><label>Topic ID<input name="topicID" required></label><label>Event ID<input name="eventID" value="console-event" required></label><label>Type<input name="eventType" value="console.probe" required></label><label>Correlation ID<input name="correlationID" value="console-correlation" required></label><label>Payload<input name="payload" maxlength="1048576"></label><label>Retries<input name="retries" type="number" min="0" max="8" value="0" required></label><button type="submit">Deliver probe</button></form></div><div class="table-wrap"><table><thead><tr><th>Topics</th><th>Subscriptions</th><th>Dead letters</th></tr></thead><tbody><tr><td>{{range .Topics}}<div><strong>{{.Name}}</strong><br><code>{{.ID}}</code> · owner {{.Owner}}<form method="post" action="{{baseURL $.BasePath "/control/topic-delete"}}" class="inline-form"><input type="hidden" name="tenant" value="{{$.TenantID}}"><input type="hidden" name="scope" value="{{$.SelectedScope}}"><input type="hidden" name="section" value="events"><input type="hidden" name="topicID" value="{{.ID}}"><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> Confirm</label><button class="text-danger" type="submit">Delete</button></form></div>{{else}}none{{end}}</td><td>{{range .Subscriptions}}<div><strong>{{.Name}}</strong><br><code>{{.ID}}</code> · topic {{.TopicID}} · {{.Filter.Type}}<form method="post" action="{{baseURL $.BasePath "/control/subscription-delete"}}" class="inline-form"><input type="hidden" name="tenant" value="{{$.TenantID}}"><input type="hidden" name="scope" value="{{$.SelectedScope}}"><input type="hidden" name="section" value="events"><input type="hidden" name="subscriptionID" value="{{.ID}}"><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> Confirm</label><button class="text-danger" type="submit">Delete</button></form></div>{{else}}none{{end}}</td><td>{{range .DeadLetters}}<div><code>{{.DeliveryID}}</code><br>{{.Reason}} · {{.Attempts}} attempts<br><code>{{.PayloadSHA256}}</code></div>{{else}}none{{end}}</td></tr></tbody></table></div>{{else}}<p class="muted">Select a group scope to configure the local event runtime.</p>{{end}}<p class="muted">This is Ember's local scoped event broker, not Kafka. Dead-letter payloads are intentionally redacted; this UI does not invent a replay payload or consumer.</p></section>
+          <section class="card" id="metrics"><div class="section-heading"><div><p class="eyebrow">Observability</p><h2>Event metrics</h2></div><span class="badge">constant cardinality {{.Metrics.Cardinality}}</span></div><div class="metric-strip"><div class="metric"><span class="metric-label">Deliveries</span><strong>{{.Metrics.DeliveryCount}}</strong></div><div class="metric"><span class="metric-label">Succeeded</span><strong>{{.Metrics.SuccessCount}}</strong></div><div class="metric"><span class="metric-label">Failed</span><strong>{{.Metrics.FailureCount}}</strong></div><div class="metric"><span class="metric-label">Retries</span><strong>{{.Metrics.RetryCount}}</strong></div><div class="metric"><span class="metric-label">Dead letters</span><strong>{{.Metrics.DeadLetterCount}}</strong></div><div class="metric"><span class="metric-label">Recoveries</span><strong>{{.Metrics.RecoveryCount}}</strong></div></div></section>
+          <section class="card" id="limits"><div class="section-heading"><div><p class="eyebrow">Capability boundary</p><h2>What Ember does not provide</h2></div></div><div class="unavailable-grid"><div><strong>Kafka</strong><p>No broker, partitions, consumer groups, offsets, replication, or Kafka protocol adapter exists.</p></div><div><strong>Cloud provider resources</strong><p>These controls operate Ember's local-first stores and provider contracts only; they do not provision AWS, Azure, or GCP resources.</p></div><div><strong>Secrets / Key Vault</strong><p>No secret-management provider or credential storage UI exists. The portal never accepts or displays secrets.</p></div></div></section>
         </div>
-        {{else}}<p class="muted">No child resources.</p>{{end}}
-        <h3 class="subheading">Create child resource</h3>
-        {{template "resource-form" .}}
-      </section>
-      <section class="card">
-        <div class="section-heading"><div><p class="eyebrow">Traceability</p><h2>Operations</h2></div><span class="badge">{{len .Operations}} shown</span></div>
-        {{if .Operations}}<div class="table-wrap"><table><thead><tr><th>ID</th><th>Status</th><th>Request</th><th>Outcome</th><th>Updated</th></tr></thead><tbody>{{range .Operations}}<tr><td><code>{{.ID}}</code></td><td>{{.Status}}</td><td><code>{{.RequestID}}</code></td><td>{{.Outcome}}</td><td>{{formatTime .UpdatedAt}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No operations recorded.</p>{{end}}
-        <h2 class="subheading">Audit</h2>
-        {{if .Audit}}<div class="table-wrap"><table><thead><tr><th>Action</th><th>Outcome</th><th>Correlation</th><th>Created</th></tr></thead><tbody>{{range .Audit}}<tr><td>{{.Action}}</td><td>{{.Outcome}}</td><td><code>{{.CorrelationID}}</code></td><td>{{formatTime .CreatedAt}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No audit entries recorded.</p>{{end}}
-      </section>
+      </div>
+    {{else if eq .View "resource"}}
+      {{if eq .Resource.Spec.Type "bucket"}}
+      <div class="portal-breadcrumbs"><a href="{{if .TenantID}}{{tenantURL .BasePath .TenantID}}{{else}}{{baseURL .BasePath "/"}}{{end}}">Resources</a><span>/</span><span>{{.Resource.Spec.Name}}</span></div>
+      <div class="resource-layout">
+        <aside class="resource-sidebar" aria-label="Resource navigation">
+          <p class="sidebar-kicker">Storage resource</p>
+          <h2>{{.Resource.Spec.Name}}</h2>
+          <p class="sidebar-id"><code>{{.Resource.ID}}</code></p>
+          <nav class="side-nav">
+            <a class="side-nav-item active" href="#overview"><span class="nav-mark"></span>Overview</a>
+            <a class="side-nav-item" href="#objects"><span class="nav-mark"></span>Objects</a>
+            <a class="side-nav-item" href="#configuration"><span class="nav-mark"></span>Configuration</a>
+            <a class="side-nav-item" href="#activity"><span class="nav-mark"></span>Activity log</a>
+          </nav>
+          <div class="sidebar-context"><span>Parent scope</span><code>{{.ParentScope}}</code></div>
+        </aside>
+        <div class="resource-content">
+          <section class="resource-header" id="overview">
+            <div class="resource-heading-row">
+              <div>
+                <p class="resource-kicker">Bucket</p>
+                <h1>{{.Resource.Spec.Name}}</h1>
+                <p class="resource-subtitle"><span class="state-dot"></span>Desired <strong>{{if .Resource.Spec.DesiredState}}{{.Resource.Spec.DesiredState}}{{else}}unspecified{{end}}</strong><span class="meta-separator">·</span>Observed <strong>{{.Resource.ObservedState}}</strong><span class="meta-separator">·</span>Local blob storage</p>
+              </div>
+              <div class="resource-actions"><a class="button primary" href="#upload">Upload object</a><a class="button secondary" href="#objects">Browse objects</a></div>
+            </div>
+            <div class="command-bar" aria-label="Resource actions">
+              <a class="command-item" href="#upload"><span class="command-symbol">↑</span><span><strong>Upload</strong><small>Add a blob</small></span></a>
+              <a class="command-item" href="#objects"><span class="command-symbol">≡</span><span><strong>Browse</strong><small>View objects</small></span></a>
+              <a class="command-item" href="#configuration"><span class="command-symbol">⚙</span><span><strong>Properties</strong><small>Inspect settings</small></span></a>
+            </div>
+          </section>
+          <section class="metric-strip" aria-label="Bucket summary">
+            <div class="metric"><span class="metric-label">Objects</span><strong>{{len .Objects}}</strong><span class="metric-note">stored in bucket</span></div>
+            <div class="metric"><span class="metric-label">Storage used</span><strong>{{formatBytes .ObjectBytes}}</strong><span class="metric-note">current payload total</span></div>
+            <div class="metric"><span class="metric-label">Object limit</span><strong>10 MiB</strong><span class="metric-note">maximum per object</span></div>
+            <div class="metric"><span class="metric-label">Integrity</span><strong>SHA-256</strong><span class="metric-note">recorded on write</span></div>
+          </section>
+          <section class="workspace-panel" id="objects">
+            <div class="panel-heading"><div><p class="section-label">Bucket contents</p><h2>Objects</h2></div><span class="count-label">{{len .Objects}} object{{if ne (len .Objects) 1}}s{{end}}</span></div>
+            <form id="upload" method="post" enctype="multipart/form-data" action="{{resourceObjectsURL .BasePath .TenantID .Resource.ID .ParentScope}}" class="upload-panel">
+              <div class="upload-copy"><span class="upload-symbol">↑</span><div><h3>Add an object</h3><p>Choose a file and assign the key Ember will use to store it.</p></div></div>
+              <div class="upload-fields"><label class="field">Object key<input name="objectKey" required maxlength="1024" placeholder="images/logo.png"></label><label class="field">File<input name="contentFile" type="file" required></label><button class="button primary" type="submit">Upload</button></div>
+            </form>
+            {{if .Objects}}
+            <div class="table-wrap object-table"><table><caption class="sr-only">Objects in {{.Resource.Spec.Name}}</caption><thead><tr><th>Name</th><th>Size</th><th>SHA-256</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>{{range .Objects}}<tr><td><a class="object-name" href="{{resourceObjectURL $.BasePath $.TenantID $.Resource.ID $.ParentScope .Key}}"><span class="file-mark">·</span><code>{{.Key}}</code></a></td><td>{{formatBytes .Size}}</td><td><code class="hash">{{.SHA256}}</code></td><td><form method="post" action="{{resourceDeleteObjectURL $.BasePath $.TenantID $.Resource.ID $.ParentScope}}" class="inline-form"><input type="hidden" name="objectKey" value="{{.Key}}"><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> Confirm</label><button class="text-danger" type="submit">Delete</button></form></td></tr>{{end}}</tbody></table></div>
+            {{else}}
+            <div class="empty-state"><span class="empty-symbol">＋</span><h3>No objects yet</h3><p>This bucket has no stored blobs. Use the upload form above to add your first object.</p><a class="button secondary" href="#upload">Upload first object</a></div>
+            {{end}}
+          </section>
+          <div class="detail-grid">
+            <section class="workspace-panel" id="configuration"><div class="panel-heading"><div><p class="section-label">Resource settings</p><h2>Configuration</h2></div></div><dl class="detail-list"><div><dt>Resource type</dt><dd>Bucket</dd></div><div><dt>Desired state</dt><dd>{{if .Resource.Spec.DesiredState}}{{.Resource.Spec.DesiredState}}{{else}}unspecified{{end}}</dd></div><div><dt>Observed state</dt><dd>{{.Resource.ObservedState}}</dd></div><div><dt>Resource ID</dt><dd><code>{{.Resource.ID}}</code></dd></div></dl><form method="post" action="{{resourceTagsURL .BasePath .TenantID .Resource.ID .ParentScope}}" class="tags-form"><label>Tags<input name="tags" value="{{tagsValue .Resource.Spec.Tags}}" maxlength="8192" placeholder="environment=test,owner=platform"></label><button class="button secondary" type="submit">Save tags</button></form></section><section class="workspace-panel" id="lock"><div class="panel-heading"><div><p class="section-label">Concurrency safety</p><h2>Resource lock</h2></div><span class="count-label">{{if .Lock}}locked{{else}}unlocked{{end}}</span></div>{{if .Lock}}<p class="muted">Owner <code>{{.Lock.Owner}}</code> holds the lock. The token is never displayed.</p><form method="post" action="{{resourceURL .BasePath .TenantID .Resource.ID .ParentScope}}/lock/release" class="stack"><input type="hidden" name="scope" value="{{.ParentScope}}"><label>Owner<input name="owner" required></label><label>Token<input name="token" type="password" required autocomplete="off"></label><button class="button danger" type="submit">Release lock</button></form>{{else}}<p class="muted">Acquire a lock before coordinated state changes.</p><form method="post" action="{{resourceURL .BasePath .TenantID .Resource.ID .ParentScope}}/lock/acquire" class="stack"><input type="hidden" name="scope" value="{{.ParentScope}}"><label>Owner<input name="owner" required></label><label>Token<input name="token" type="password" required autocomplete="off"></label><button class="button secondary" type="submit">Acquire lock</button></form>{{end}}</section><section class="workspace-panel" id="activity"><div class="panel-heading"><div><p class="section-label">Activity</p><h2>Activity log</h2></div><span class="count-label">{{len .Operations}} operations</span></div>{{if .Operations}}<div class="activity-list">{{range .Operations}}<div class="activity-row"><span class="activity-dot"></span><div><strong>{{.Outcome}}</strong><p>{{.Status}} · {{formatTime .UpdatedAt}}</p></div></div>{{end}}</div>{{else}}<div class="compact-empty">No operations recorded yet.</div>{{end}}</section>
+          </div>
+          <section class="danger-panel"><div><p class="section-label">Danger zone</p><h2>Delete this bucket</h2><p>This permanently removes the resource and its stored objects. GET requests never delete data.</p></div><form method="post" action="{{resourceDeleteURL .BasePath .TenantID .Resource.ID .ParentScope}}"><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> I understand this is destructive.</label><button class="button danger" type="submit">Delete bucket</button></form></section>
+        </div>
+      </div>
+      {{else}}
+      <section class="hero"><p class="eyebrow">{{if .TenantID}}Tenant resource{{else}}Platform resource{{end}}</p><h1>{{.Resource.Spec.Name}}</h1><p><code>{{.Resource.ID}}</code> · {{.Resource.Spec.Type}} · desired <strong>{{.Resource.Spec.DesiredState}}</strong> · observed <strong>{{.Resource.ObservedState}}</strong></p></section>
+      <div class="grid two-column"><section class="card"><h2>Update tags</h2><p class="muted">Use comma-separated <code>key=value</code> pairs. The update records an operation and audit entry.</p><form method="post" action="{{resourceTagsURL .BasePath .TenantID .Resource.ID .ParentScope}}" class="stack"><label>Tags <input name="tags" value="{{tagsValue .Resource.Spec.Tags}}" maxlength="8192"></label><button type="submit">Save tags</button></form></section><section class="card warning-card"><h2>Delete resource</h2><p class="muted">Deletion is never performed by GET and requires the confirmation checkbox.</p><form method="post" action="{{resourceDeleteURL .BasePath .TenantID .Resource.ID .ParentScope}}" class="stack"><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> I understand this is destructive.</label><button class="danger" type="submit">Delete resource</button></form></section></div>
+      <section class="card"><div class="section-heading"><div><p class="eyebrow">Child scope</p><h2>Children</h2></div><span class="badge">{{len .Children}} shown</span></div>{{if .Children}}<div class="list-grid">{{range .Children}}<article class="list-item"><div><h3><a href="{{resourceURL $.BasePath $.TenantID .ID .Spec.ParentID}}">{{.Spec.Name}}</a></h3><p class="muted"><code>{{.ID}}</code> · {{.Spec.Type}} · {{.ObservedState}}</p></div><a class="button secondary" href="{{resourceURL $.BasePath $.TenantID .ID .Spec.ParentID}}">Inspect</a></article>{{end}}</div>{{else}}<p class="muted">No child resources.</p>{{end}}<h3 class="subheading">Create child resource</h3>{{template "resource-form" .}}</section>
+      <section class="card"><div class="section-heading"><div><p class="eyebrow">Concurrency safety</p><h2>Resource lock</h2></div><span class="badge">{{if .Lock}}locked{{else}}unlocked{{end}}</span></div>{{if .Lock}}<p class="muted">Owner <code>{{.Lock.Owner}}</code> holds the lock. The token is never displayed.</p><form method="post" action="{{resourceURL .BasePath .TenantID .Resource.ID .ParentScope}}/lock/release" class="stack"><input type="hidden" name="scope" value="{{.ParentScope}}"><label>Owner<input name="owner" required></label><label>Token<input name="token" type="password" required autocomplete="off"></label><button class="danger" type="submit">Release lock</button></form>{{else}}<p class="muted">A lock makes the resource read-only to other state-changing operations.</p><form method="post" action="{{resourceURL .BasePath .TenantID .Resource.ID .ParentScope}}/lock/acquire" class="stack"><input type="hidden" name="scope" value="{{.ParentScope}}"><label>Owner<input name="owner" required></label><label>Token<input name="token" type="password" required autocomplete="off"></label><button type="submit">Acquire lock</button></form>{{end}}</section>
+      <section class="card"><div class="section-heading"><div><p class="eyebrow">Traceability</p><h2>Operations</h2></div><span class="badge">{{len .Operations}} shown</span></div>{{if .Operations}}<div class="table-wrap"><table><thead><tr><th>ID</th><th>Status</th><th>Request</th><th>Outcome</th><th>Updated</th></tr></thead><tbody>{{range .Operations}}<tr><td><code>{{.ID}}</code></td><td>{{.Status}}</td><td><code>{{.RequestID}}</code></td><td>{{.Outcome}}</td><td>{{formatTime .UpdatedAt}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No operations recorded.</p>{{end}}<h2 class="subheading">Audit</h2>{{if .Audit}}<div class="table-wrap"><table><thead><tr><th>Action</th><th>Outcome</th><th>Correlation</th><th>Created</th></tr></thead><tbody>{{range .Audit}}<tr><td>{{.Action}}</td><td>{{.Outcome}}</td><td><code>{{.CorrelationID}}</code></td><td>{{formatTime .CreatedAt}}</td></tr>{{end}}</tbody></table></div>{{else}}<p class="muted">No audit entries recorded.</p>{{end}}</section>
+      {{end}}
     {{else}}
       <section class="hero"><h1>Request error</h1><p>Ember could not complete this request.</p></section>
     {{end}}
@@ -129,28 +175,20 @@
 {{end}}
 
 {{define "resource-form"}}
-<form method="post" action="{{if eq .View "platform"}}/resources{{else if eq .View "tenant"}}{{tenantURL .Tenant.ID}}/resources{{else}}{{resourceURL .TenantID .Resource.ID .ParentScope}}{{end}}" class="stack">
+<form method="post" action="{{if eq .View "platform"}}{{baseURL .BasePath "/resources"}}{{else if eq .View "tenant"}}{{tenantURL .BasePath .Tenant.ID}}/resources{{else}}{{resourceURL .BasePath .TenantID .Resource.ID .ParentScope}}{{end}}" class="stack resource-create-form">
   {{if eq .View "resource"}}<input type="hidden" name="parentID" value="{{.Resource.ID}}">{{end}}
-  <label>Type
-    <select name="type" required>
-      <option value="group">Group</option>
-      <option value="bucket">Bucket</option>
-      <option value="workload">Workload</option>
-    </select>
-  </label>
-  <label>Name <input name="name" required maxlength="128"></label>
-  <label>Desired state
-    <select name="desiredState">
-      <option value="ready">Ready</option>
-      <option value="pending">Pending</option>
-      <option value="unknown">Unknown</option>
-    </select>
-  </label>
-  <details><summary>Provider metadata (optional)</summary><div class="stack details-body">
-    <label>Namespace <input name="providerNamespace" maxlength="64"></label>
-    <label>Type <input name="providerType" maxlength="128"></label>
-    <label>Version <input name="providerVersion" maxlength="32"></label>
-  </div></details>
+  <fieldset class="choice-fieldset"><legend>Resource type</legend><div class="choice-grid three-up">
+    <label class="choice-card"><input name="type" type="radio" value="group" checked><span><strong>Group</strong><small>Organize related resources</small></span></label>
+    <label class="choice-card"><input name="type" type="radio" value="bucket"><span><strong>Bucket</strong><small>Store blobs and files</small></span></label>
+    <label class="choice-card"><input name="type" type="radio" value="workload"><span><strong>Workload</strong><small>Track an executable service</small></span></label>
+  </div></fieldset>
+  <label>Name <input name="name" required maxlength="128" placeholder="Resource name"></label>
+  <fieldset class="choice-fieldset"><legend>Desired state</legend><div class="choice-pills">
+    <label class="choice-pill"><input name="desiredState" type="radio" value="ready" checked><span>Ready</span></label>
+    <label class="choice-pill"><input name="desiredState" type="radio" value="pending"><span>Pending</span></label>
+    <label class="choice-pill"><input name="desiredState" type="radio" value="unknown"><span>Unknown</span></label>
+  </div></fieldset>
+  <div class="provider-grid"><div class="provider-heading"><strong>Provider metadata</strong><span>Optional</span></div><label>Namespace<input name="providerNamespace" maxlength="64" placeholder="ember.local"></label><label>Type<input name="providerType" maxlength="128" placeholder="storage.bucket"></label><label>Version<input name="providerVersion" maxlength="32" placeholder="v1"></label></div>
   <button type="submit">Create resource</button>
 </form>
 {{end}}
@@ -159,7 +197,7 @@
 {{if .Resources}}
 <div class="list-grid">
   {{range .Resources}}
-  <article class="list-item"><div><h3><a href="{{resourceURL $.TenantID .ID .Spec.ParentID}}">{{.Spec.Name}}</a></h3><p class="muted"><code>{{.ID}}</code> · {{.Spec.Type}} · {{.ObservedState}}</p></div><a class="button secondary" href="{{resourceURL $.TenantID .ID .Spec.ParentID}}">Inspect</a></article>
+  <article class="list-item"><div><h3><a href="{{resourceURL $.BasePath $.TenantID .ID .Spec.ParentID}}">{{.Spec.Name}}</a></h3><p class="muted"><code>{{.ID}}</code> · {{.Spec.Type}} · {{.ObservedState}}</p></div><a class="button secondary" href="{{resourceURL $.BasePath $.TenantID .ID .Spec.ParentID}}">Inspect</a></article>
   {{end}}
 </div>
 {{else}}<p class="muted">No resources in this scope.</p>{{end}}

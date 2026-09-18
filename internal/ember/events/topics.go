@@ -91,6 +91,65 @@ type TopicBroker struct {
 	subscriptions      map[string]Subscription
 }
 
+type TopicBrokerState struct {
+	NextTopicID        uint64
+	NextSubscriptionID uint64
+	Topics             []Topic
+	Subscriptions      []Subscription
+}
+
+func (broker *TopicBroker) Snapshot() TopicBrokerState {
+	broker.mu.RLock()
+	defer broker.mu.RUnlock()
+	state := TopicBrokerState{NextTopicID: broker.nextTopicID, NextSubscriptionID: broker.nextSubscriptionID, Topics: make([]Topic, 0, len(broker.topics)), Subscriptions: make([]Subscription, 0, len(broker.subscriptions))}
+	for _, topic := range broker.topics {
+		state.Topics = append(state.Topics, topic)
+	}
+	for _, subscription := range broker.subscriptions {
+		state.Subscriptions = append(state.Subscriptions, subscription)
+	}
+	sort.Slice(state.Topics, func(i, j int) bool { return state.Topics[i].ID < state.Topics[j].ID })
+	sort.Slice(state.Subscriptions, func(i, j int) bool { return state.Subscriptions[i].ID < state.Subscriptions[j].ID })
+	return state
+}
+
+func (broker *TopicBroker) Restore(state TopicBrokerState) error {
+	if len(state.Topics) > broker.maxTopics || len(state.Subscriptions) > broker.maxSubscriptions {
+		return ErrTopicLimitExceeded
+	}
+	topics := make(map[string]Topic, len(state.Topics))
+	for _, topic := range state.Topics {
+		if err := validateTopicIdentity(topic.ScopeID, topic.Owner, topic.Name); err != nil || topic.ID == "" {
+			return ErrInvalidTopic
+		}
+		if _, exists := topics[topic.ID]; exists {
+			return ErrDuplicateTopic
+		}
+		topics[topic.ID] = topic
+	}
+	subscriptions := make(map[string]Subscription, len(state.Subscriptions))
+	for _, subscription := range state.Subscriptions {
+		if err := validateSubscriptionIdentity(subscription.ScopeID, subscription.Owner, subscription.Name); err != nil || subscription.ID == "" {
+			return ErrInvalidSubscription
+		}
+		topic, exists := topics[subscription.TopicID]
+		if !exists || topic.ScopeID != subscription.ScopeID || subscription.Filter.Validate() != nil {
+			return ErrInvalidSubscription
+		}
+		if _, exists := subscriptions[subscription.ID]; exists {
+			return ErrDuplicateSubscription
+		}
+		subscriptions[subscription.ID] = subscription
+	}
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	broker.topics = topics
+	broker.subscriptions = subscriptions
+	broker.nextTopicID = state.NextTopicID
+	broker.nextSubscriptionID = state.NextSubscriptionID
+	return nil
+}
+
 func NewTopicBroker(options TopicBrokerOptions) (*TopicBroker, error) {
 	if options.MaxTopics <= 0 || options.MaxTopics > MaxTopicCount ||
 		options.MaxSubscriptions <= 0 || options.MaxSubscriptions > MaxSubscriptionCount {
@@ -160,6 +219,50 @@ func (broker *TopicBroker) CreateTopic(ctx context.Context, scopeID, owner, name
 	}
 	broker.topics[topic.ID] = topic
 	return &topic, nil
+}
+
+func (broker *TopicBroker) ListTopics(ctx context.Context, scopeID string, limit int) ([]Topic, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateTopicScope(scopeID); err != nil || limit <= 0 {
+		return nil, ErrInvalidTopic
+	}
+	broker.mu.RLock()
+	defer broker.mu.RUnlock()
+	topics := make([]Topic, 0, len(broker.topics))
+	for _, topic := range broker.topics {
+		if topic.ScopeID == scopeID {
+			topics = append(topics, topic)
+		}
+	}
+	sort.Slice(topics, func(i, j int) bool { return topics[i].ID < topics[j].ID })
+	if len(topics) > limit {
+		topics = topics[:limit]
+	}
+	return topics, nil
+}
+
+func (broker *TopicBroker) ListSubscriptions(ctx context.Context, scopeID string, limit int) ([]Subscription, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateTopicScope(scopeID); err != nil || limit <= 0 {
+		return nil, ErrInvalidSubscription
+	}
+	broker.mu.RLock()
+	defer broker.mu.RUnlock()
+	subscriptions := make([]Subscription, 0, len(broker.subscriptions))
+	for _, subscription := range broker.subscriptions {
+		if subscription.ScopeID == scopeID {
+			subscriptions = append(subscriptions, subscription)
+		}
+	}
+	sort.Slice(subscriptions, func(i, j int) bool { return subscriptions[i].ID < subscriptions[j].ID })
+	if len(subscriptions) > limit {
+		subscriptions = subscriptions[:limit]
+	}
+	return subscriptions, nil
 }
 
 func (broker *TopicBroker) GetTopic(ctx context.Context, scopeID, topicID string) (*Topic, error) {
