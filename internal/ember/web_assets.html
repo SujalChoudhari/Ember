@@ -102,15 +102,44 @@
         {{else}}<div class="empty-state compact-empty"><h3>No tenants yet</h3><p>Create a tenant to start managing isolated resource state.</p><a class="button secondary" href="#tenant-form">Create a tenant</a></div>{{end}}
       </section>
     {{else if eq .View "tenant"}}
-      <section class="hero">
-        <p class="eyebrow">Tenant scope</p>
+      <section class="tenant-overview">
+        <p class="eyebrow">Tenant overview</p>
         <h1>{{.Tenant.DisplayName}}</h1>
-        <p><code>{{.Tenant.ID}}</code> · isolated SQLite resource database</p>
+        <p><code>{{.Tenant.ID}}</code> · isolated SQLite resource database · tenant context is active{{if .SelectedScope}} · selected group scope <code>{{.SelectedScope}}</code>{{else}} · No group scope is selected{{end}}</p>
       </section>
-      <section class="metric-strip tenant-summary" aria-label="Tenant summary">
-        <div class="metric"><span class="metric-label">Tenant ID</span><strong><code>{{.TenantSummary.Tenant.ID}}</code></strong><span class="metric-note">stable identity boundary</span></div>
+      <section class="metric-strip tenant-summary" aria-label="Tenant resource summary">
         <div class="metric"><span class="metric-label">Resources</span><strong>{{.TenantSummary.ResourceCount}}</strong><span class="metric-note">{{.TenantSummary.ResourceCount}} resource{{if ne .TenantSummary.ResourceCount 1}}s{{end}} in this tenant</span></div>
-        <div class="metric"><span class="metric-label">Status</span><strong>{{.TenantSummary.Status}}</strong><span class="metric-note">derived from observed state</span></div>
+        <div class="metric"><span class="metric-label">Groups</span><strong>{{.TenantSummary.GroupCount}}</strong><span class="metric-note">available scopes</span></div>
+        <div class="metric"><span class="metric-label">Buckets</span><strong>{{.TenantSummary.BucketCount}}</strong><span class="metric-note">object stores</span></div>
+        <div class="metric"><span class="metric-label">Workloads</span><strong>{{.TenantSummary.WorkloadCount}}</strong><span class="metric-note">tracked services</span></div>
+      </section>
+      <section class="card tenant-scope-card" aria-labelledby="tenant-scope-heading">
+        <div class="section-heading"><div><p class="eyebrow">Explicit boundary</p><h2 id="tenant-scope-heading">Choose a group scope</h2></div><span class="badge">{{.TenantSummary.Status}}</span></div>
+        <p>Scoped actions never infer a group. Select the group you intend to inspect before opening the control center.</p>
+        <form method="get" action="{{baseURL .BasePath "/control"}}" class="scope-selector">
+          <input type="hidden" name="tenant" value="{{.TenantID}}">
+          <label>Group scope
+            <select name="scope" required>
+              <option value=""{{if not .SelectedScope}} selected{{end}}>Choose a group scope</option>
+              {{range .ScopeOptions}}<option value="{{.ID}}"{{if eq $.SelectedScope .ID}} selected{{end}}>{{.Spec.Name}} · {{.ID}}</option>{{end}}
+            </select>
+          </label>
+          <input type="hidden" name="section" value="overview">
+          <button type="submit"{{if not .ScopeOptions}} disabled{{end}}>Open scoped control center</button>
+        </form>
+        {{if not .ScopeOptions}}<p class="muted">No group resources are available yet. Create a group to activate scoped controls.</p>{{end}}
+      </section>
+      <section class="card tenant-health" aria-label="Tenant health">
+        <div class="section-heading"><div><p class="eyebrow">Observed state</p><h2>Tenant health</h2></div><span class="badge">{{.TenantSummary.Status}}</span></div>
+        <p>Health is derived from the observed state of the tenant's resources. The overview does not invent provider or metric data.</p>
+      </section>
+      <section class="card tenant-activity" id="activity">
+        <div class="section-heading"><div><p class="eyebrow">Traceability</p><h2>Recent activity</h2></div><span class="badge">{{len .TenantActivity}} shown</span></div>
+        {{if .TenantActivity}}
+        <div class="table-wrap"><table><thead><tr><th>Resource</th><th>Operation</th><th>Status</th><th>Outcome</th><th>Updated</th></tr></thead><tbody>
+          {{range .TenantActivity}}<tr><td><a href="{{resourceURL $.BasePath $.TenantID .Resource.ID .Resource.Spec.ParentID}}">{{.Resource.Spec.Name}}</a><br><code>{{.Resource.ID}}</code></td><td><code>{{.Operation.ID}}</code><br><small><code>{{.Operation.RequestID}}</code></small></td><td>{{.Operation.Status}}</td><td>{{.Operation.Outcome}}</td><td>{{formatTime .Operation.UpdatedAt}}</td></tr>{{end}}
+        </tbody></table></div>
+        {{else}}<div class="empty-state compact-empty"><h3>No recent activity</h3><p>Resource mutations will appear here with their request identity and outcome.</p></div>{{end}}
       </section>
       <div class="grid two-column">
         <section class="card">
@@ -127,7 +156,7 @@
         </section>
       </div>
       <section class="card">
-        <div class="section-heading"><div><p class="eyebrow">Tenant scope</p><h2>Resources</h2></div><span class="badge">{{len .Resources}} shown</span></div>
+        <div class="section-heading"><div><p class="eyebrow">Tenant resources</p><h2>Root resources</h2></div><span class="badge">{{len .Resources}} shown</span></div>
         {{template "resource-list" .}}
       </section>
     {{else if eq .View "control"}}
