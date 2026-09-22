@@ -65,6 +65,15 @@ main { padding: 2rem 0 3rem; }
 .health-breakdown span { color: var(--muted); font-size: .8rem; }
 .health-breakdown strong { color: var(--ink); font-size: 1.1rem; margin-right: .25rem; }
 .platform-table table { min-width: 44rem; }
+.inventory-filters { align-items: end; background: var(--surface-muted); border: 1px solid var(--line); border-radius: .45rem; display: grid; gap: .65rem; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: .9rem; padding: .8rem; }
+.inventory-filters label { font-size: .74rem; }
+.inventory-filters .filter-actions { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; }
+.inventory-table table { min-width: 68rem; }
+.inventory-table th a { color: inherit; text-decoration: none; }
+.inventory-table th a:hover { color: var(--blue-dark); text-decoration: underline; }
+.inventory-table td { min-width: 7rem; }
+.inventory-footer { align-items: center; color: var(--muted); display: flex; flex-wrap: wrap; gap: .55rem; justify-content: flex-end; margin-top: .8rem; }
+.inventory-footer > span { margin-right: auto; }
 .tenant-overview { margin-bottom: 1rem; }
 .tenant-overview h1 { margin-bottom: .45rem; }
 .tenant-overview p:last-child { color: var(--muted); margin-bottom: 0; }
@@ -257,6 +266,8 @@ th { color: var(--muted); font-size: .76rem; letter-spacing: .04em; text-transfo
   .overview-intro { flex-direction: column; }
   .overview-actions { justify-content: flex-start; }
   .health-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .inventory-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .inventory-filters .filter-actions { grid-column: 1 / -1; }
 }
 
 /* Control center */

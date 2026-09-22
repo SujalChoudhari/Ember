@@ -557,6 +557,75 @@ func TestWebServeAddressRejectsNonLoopbackBinds(t *testing.T) {
 	}
 }
 
+func TestWebResourceInventoryFiltersSortsAndPaginatesHierarchy(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	if _, err := operator.CreateTenant(context.Background(), OperatorPrincipal{}, models.Tenant{ID: "alpha", DisplayName: "Alpha"}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	group, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha"}, models.ResourceSpec{
+		Type: models.ResourceTypeGroup, Name: "operations", DesiredState: models.ResourceStateReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(group) error = %v", err)
+	}
+	for _, name := range []string{"backups", "artifacts"} {
+		if _, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: group.ID}, models.ResourceSpec{
+			Type: models.ResourceTypeBucket, Name: name, ParentID: group.ID, DesiredState: models.ResourceStateReady,
+		}); err != nil {
+			t.Fatalf("CreateResource(%q) error = %v", name, err)
+		}
+	}
+	if _, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha"}, models.ResourceSpec{
+		Type: models.ResourceTypeGroup, Name: "other", DesiredState: models.ResourceStateReady,
+	}); err != nil {
+		t.Fatalf("CreateResource(other) error = %v", err)
+	}
+
+	first := webRequest(t, handler, http.MethodGet, "/?tenant=alpha&type=bucket&sort=name&order=asc&page=1&pageSize=1", nil)
+	firstHTML := first.Body.String()
+	if first.Code != http.StatusOK {
+		t.Fatalf("filtered inventory page 1 = %d %q, want success", first.Code, firstHTML)
+	}
+	for _, want := range []string{
+		`class="inventory-filters"`,
+		"inventory-table",
+		"Parent",
+		"Tenant",
+		"Desired",
+		"Observed",
+		"Alpha",
+		"artifacts",
+		"Showing 1–1 of 2 resources",
+		`aria-label="Next resource inventory page"`,
+		`href="/tenants/alpha/resources/` + group.ID + `"`,
+	} {
+		if !strings.Contains(firstHTML, want) {
+			t.Fatalf("filtered inventory page 1 missing %q: %q", want, firstHTML)
+		}
+	}
+	if strings.Contains(firstHTML, "backups") || strings.Contains(firstHTML, "other") {
+		t.Fatalf("filtered inventory page 1 contains rows outside the filter/page: %q", firstHTML)
+	}
+
+	second := webRequest(t, handler, http.MethodGet, "/?tenant=alpha&type=bucket&sort=name&order=asc&page=2&pageSize=1", nil)
+	secondHTML := second.Body.String()
+	if second.Code != http.StatusOK || !strings.Contains(secondHTML, "backups") || strings.Contains(secondHTML, "artifacts") || !strings.Contains(secondHTML, "Showing 2–2 of 2 resources") {
+		t.Fatalf("filtered inventory page 2 = %d %q, want second sorted row", second.Code, secondHTML)
+	}
+
+	style := webRequest(t, handler, http.MethodGet, "/static/style.css", nil)
+	styleHTML := style.Body.String()
+	if style.Code != http.StatusOK || !strings.Contains(styleHTML, ".inventory-table") || !strings.Contains(styleHTML, "overflow-x: auto") {
+		t.Fatalf("inventory stylesheet = %d %q, want horizontally scrollable mobile table", style.Code, styleHTML)
+	}
+}
+
 func webRequest(t *testing.T, handler http.Handler, method, path string, body *strings.Reader) *httptest.ResponseRecorder {
 	t.Helper()
 	if body == nil {
