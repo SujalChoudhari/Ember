@@ -229,6 +229,78 @@ func TestWebShellKeepsNavigationAndContextAcrossPages(t *testing.T) {
 	}
 }
 
+func TestWebResourceHeaderPreservesHierarchyAndSupportedActions(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	createdTenant := webForm(t, handler, http.MethodPost, "/tenants", url.Values{
+		"id": {"alpha"}, "displayName": {"<Alpha & Ops>"},
+	})
+	if createdTenant.Code != http.StatusSeeOther {
+		t.Fatalf("POST /tenants = %d location %q, want tenant redirect", createdTenant.Code, createdTenant.Header().Get("Location"))
+	}
+	createdGroup := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources", url.Values{
+		"type": {"group"}, "name": {"<Operations>"}, "desiredState": {"ready"},
+	})
+	if createdGroup.Code != http.StatusSeeOther {
+		t.Fatalf("POST tenant group = %d location %q, want tenant redirect", createdGroup.Code, createdGroup.Header().Get("Location"))
+	}
+	groups, err := operator.ListResources(context.Background(), OperatorPrincipal{TenantID: "alpha"}, 10)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("ListResources(groups) = %#v, %v, want one tenant group", groups, err)
+	}
+	createdWorkload := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources/"+url.PathEscape(groups[0].ID), url.Values{
+		"type": {"workload"}, "name": {"<worker>"}, "parentID": {groups[0].ID}, "desiredState": {"ready"},
+	})
+	if createdWorkload.Code != http.StatusSeeOther {
+		t.Fatalf("POST child workload = %d location %q, want resource redirect", createdWorkload.Code, createdWorkload.Header().Get("Location"))
+	}
+	children, err := operator.ListResources(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: groups[0].ID}, 10)
+	if err != nil || len(children) != 1 {
+		t.Fatalf("ListResources(children) = %#v, %v, want one child workload", children, err)
+	}
+
+	resourcePath := "/tenants/alpha/resources/" + url.PathEscape(children[0].ID) + "?scope=" + url.QueryEscape(groups[0].ID)
+	page := webRequest(t, handler, http.MethodGet, resourcePath, nil)
+	html := page.Body.String()
+	if page.Code != http.StatusOK {
+		t.Fatalf("GET child resource = %d %q, want detail page", page.Code, html)
+	}
+	for _, want := range []string{
+		`class="portal-breadcrumbs"`,
+		`class="resource-header"`,
+		`<p class="resource-kicker resource-type">Workload</p>`,
+		`Desired state`,
+		`Observed state`,
+		children[0].ID,
+		`class="resource-actions"`,
+		`class="danger-panel"`,
+		`scope=` + url.QueryEscape(groups[0].ID),
+		`/lock/acquire?scope=` + url.QueryEscape(groups[0].ID),
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("resource page missing %q: %q", want, html)
+		}
+	}
+	if !strings.Contains(html, "&lt;worker&gt;") || strings.Contains(html, "<worker>") {
+		t.Fatalf("resource page = %q, want escaped resource identity", html)
+	}
+	for _, unsupported := range []string{"Search", "Start", "Stop", "Restart", "Provision"} {
+		if strings.Contains(html, unsupported) {
+			t.Fatalf("resource page contains unsupported action %q: %q", unsupported, html)
+		}
+	}
+
+	unsupportedAction := webRequest(t, handler, http.MethodGet, resourcePath+"&action=restart", nil)
+	if unsupportedAction.Code != http.StatusOK || strings.Contains(unsupportedAction.Body.String(), "Restart") {
+		t.Fatalf("unsupported action query = %d %q, want unchanged detail page without unsupported control", unsupportedAction.Code, unsupportedAction.Body.String())
+	}
+}
+
 func TestWebDestructiveActionsRequireConfirmedPOST(t *testing.T) {
 	operator, err := NewFileOperator(t.TempDir(), 64<<20)
 	if err != nil {
