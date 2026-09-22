@@ -84,6 +84,7 @@ type webPlatformOverview struct {
 	Operations      []webOverviewOperation
 	TenantSummaries []webTenantSummary
 	Health          webPlatformHealth
+	Inventory       webResourceInventory
 }
 
 type webTenantSummary struct {
@@ -103,6 +104,39 @@ type webTenantActivity struct {
 type webOverviewResource struct {
 	Resource models.Resource
 	TenantID string
+	Parent   *models.Resource
+}
+
+const (
+	webResourceInventoryDefaultPageSize = 10
+	webResourceInventoryMaxPageSize     = 25
+)
+
+type webResourceInventoryFilter struct {
+	Search   string
+	Tenant   string
+	Type     string
+	Desired  string
+	Observed string
+	Sort     string
+	Order    string
+	Page     int
+	PageSize int
+}
+
+type webResourceInventory struct {
+	Rows        []webOverviewResource
+	Total       int
+	FirstRow    int
+	LastRow     int
+	Page        int
+	PageSize    int
+	PageCount   int
+	HasPrevious bool
+	HasNext     bool
+	PreviousURL string
+	NextURL     string
+	Filter      webResourceInventoryFilter
 }
 
 type webOverviewOperation struct {
@@ -140,6 +174,7 @@ func NewWebHandler(operator *Operator) http.Handler {
 			"controlURL":              webControlURL,
 			"resourceLockURL":         webResourceLockURL,
 			"resourceTypeLabel":       webResourceTypeLabel,
+			"inventorySortURL":        webInventorySortURL,
 			"tagsValue":               webTagsValue,
 			"formatTime":              webFormatTime,
 			"formatBytes":             webFormatBytes,
@@ -279,6 +314,7 @@ func (handler *webHandler) platform(writer http.ResponseWriter, request *http.Re
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
+	overview.Inventory = webFilterResourceInventory(webBasePath(request), request.URL.Query(), overview.Resources)
 	handler.render(writer, request, http.StatusOK, webPage{
 		View: "platform", Title: "Platform overview", Tenants: tenants,
 		Resources: resources, TenantSummaries: overview.TenantSummaries, PlatformOverview: overview,
@@ -288,7 +324,11 @@ func (handler *webHandler) platform(writer http.ResponseWriter, request *http.Re
 func (handler *webHandler) platformOverview(ctx context.Context, tenants []models.Tenant, platformResources []models.Resource) (webPlatformOverview, error) {
 	overview := webPlatformOverview{TenantCount: len(tenants)}
 	appendResources := func(tenantID string, resources []models.Resource) error {
-		for _, resource := range resources {
+		inventory, err := handler.tenantResourceInventory(ctx, tenantID, resources)
+		if err != nil {
+			return err
+		}
+		for _, resource := range inventory {
 			overview.Resources = append(overview.Resources, webOverviewResource{Resource: resource, TenantID: tenantID})
 			switch resource.ObservedState {
 			case models.ResourceStateReady:
@@ -301,7 +341,7 @@ func (handler *webHandler) platformOverview(ctx context.Context, tenants []model
 				overview.Health.UnknownCount++
 			}
 
-			operations, err := handler.operator.ListOperations(ctx, OperatorPrincipal{TenantID: tenantID}, resource.ID, persistence.MaxOperationListLimit)
+			operations, err := handler.operator.ListOperations(ctx, OperatorPrincipal{TenantID: tenantID, ScopeID: resource.Spec.ParentID}, resource.ID, persistence.MaxOperationListLimit)
 			if err != nil {
 				return err
 			}
@@ -332,6 +372,20 @@ func (handler *webHandler) platformOverview(ctx context.Context, tenants []model
 	})
 	if len(overview.Operations) > persistence.MaxOperationListLimit {
 		overview.Operations = overview.Operations[:persistence.MaxOperationListLimit]
+	}
+	resourceByKey := make(map[string]models.Resource, len(overview.Resources))
+	for _, row := range overview.Resources {
+		resourceByKey[row.TenantID+"\x00"+row.Resource.ID] = row.Resource
+	}
+	for index := range overview.Resources {
+		parentID := overview.Resources[index].Resource.Spec.ParentID
+		if parentID == "" {
+			continue
+		}
+		parent, ok := resourceByKey[overview.Resources[index].TenantID+"\x00"+parentID]
+		if ok {
+			overview.Resources[index].Parent = &parent
+		}
 	}
 	overview.ResourceCount = len(overview.Resources)
 	overview.OperationCount = len(overview.Operations)
@@ -925,6 +979,170 @@ func webBasePath(request *http.Request) string {
 		return ""
 	}
 	return "/" + strings.Trim(prefix, "/")
+}
+
+func webFilterResourceInventory(basePath string, values url.Values, resources []webOverviewResource) webResourceInventory {
+	filter := webResourceInventoryFilter{
+		Search:   strings.TrimSpace(values.Get("q")),
+		Tenant:   strings.TrimSpace(values.Get("tenant")),
+		Type:     strings.ToLower(strings.TrimSpace(values.Get("type"))),
+		Desired:  strings.ToLower(strings.TrimSpace(values.Get("desired"))),
+		Observed: strings.ToLower(strings.TrimSpace(values.Get("observed"))),
+		Sort:     strings.ToLower(strings.TrimSpace(values.Get("sort"))),
+		Order:    strings.ToLower(strings.TrimSpace(values.Get("order"))),
+		Page:     1,
+		PageSize: webResourceInventoryDefaultPageSize,
+	}
+	if filter.Sort != "tenant" && filter.Sort != "parent" && filter.Sort != "type" && filter.Sort != "desired" && filter.Sort != "observed" {
+		filter.Sort = "name"
+	}
+	if filter.Order != "desc" {
+		filter.Order = "asc"
+	}
+	if value, err := strconv.Atoi(values.Get("page")); err == nil && value > 0 {
+		filter.Page = value
+	}
+	if value, err := strconv.Atoi(values.Get("pageSize")); err == nil && value > 0 {
+		filter.PageSize = value
+	}
+	if filter.PageSize > webResourceInventoryMaxPageSize {
+		filter.PageSize = webResourceInventoryMaxPageSize
+	}
+
+	search := strings.ToLower(filter.Search)
+	filtered := make([]webOverviewResource, 0, len(resources))
+	for _, row := range resources {
+		if filter.Tenant != "" && !strings.EqualFold(filter.Tenant, row.TenantID) {
+			continue
+		}
+		if filter.Type != "" && !strings.EqualFold(filter.Type, string(row.Resource.Spec.Type)) {
+			continue
+		}
+		if filter.Desired != "" && !strings.EqualFold(filter.Desired, string(row.Resource.Spec.DesiredState)) {
+			continue
+		}
+		if filter.Observed != "" && !strings.EqualFold(filter.Observed, string(row.Resource.ObservedState)) {
+			continue
+		}
+		if search != "" {
+			name := strings.ToLower(row.Resource.Spec.Name)
+			id := strings.ToLower(row.Resource.ID)
+			parent := ""
+			if row.Parent != nil {
+				parent = strings.ToLower(row.Parent.Spec.Name)
+			}
+			if !strings.Contains(name, search) && !strings.Contains(id, search) && !strings.Contains(parent, search) {
+				continue
+			}
+		}
+		filtered = append(filtered, row)
+	}
+
+	inventoryValue := func(row webOverviewResource) string {
+		switch filter.Sort {
+		case "tenant":
+			if row.TenantID == "" {
+				return "platform"
+			}
+			return row.TenantID
+		case "parent":
+			if row.Parent != nil {
+				return row.Parent.Spec.Name
+			}
+			return ""
+		case "type":
+			return string(row.Resource.Spec.Type)
+		case "desired":
+			return string(row.Resource.Spec.DesiredState)
+		case "observed":
+			return string(row.Resource.ObservedState)
+		default:
+			return row.Resource.Spec.Name
+		}
+	}
+	sort.SliceStable(filtered, func(left, right int) bool {
+		leftValue := strings.ToLower(inventoryValue(filtered[left]))
+		rightValue := strings.ToLower(inventoryValue(filtered[right]))
+		if leftValue == rightValue {
+			return filtered[left].Resource.ID < filtered[right].Resource.ID
+		}
+		if filter.Order == "desc" {
+			return leftValue > rightValue
+		}
+		return leftValue < rightValue
+	})
+
+	inventory := webResourceInventory{Total: len(filtered), Filter: filter}
+	if inventory.Total > 0 {
+		inventory.PageCount = (inventory.Total + filter.PageSize - 1) / filter.PageSize
+		if filter.Page > inventory.PageCount {
+			filter.Page = inventory.PageCount
+			inventory.Filter.Page = filter.Page
+		}
+		start := (filter.Page - 1) * filter.PageSize
+		end := start + filter.PageSize
+		if end > inventory.Total {
+			end = inventory.Total
+		}
+		inventory.Rows = filtered[start:end]
+		inventory.FirstRow = start + 1
+		inventory.LastRow = end
+	} else {
+		inventory.PageCount = 1
+	}
+	inventory.Page = filter.Page
+	inventory.PageSize = filter.PageSize
+	inventory.HasPrevious = filter.Page > 1
+	inventory.HasNext = filter.Page < inventory.PageCount
+	if inventory.HasPrevious {
+		inventory.PreviousURL = webInventoryURL(basePath, filter, filter.Page-1)
+	}
+	if inventory.HasNext {
+		inventory.NextURL = webInventoryURL(basePath, filter, filter.Page+1)
+	}
+	return inventory
+}
+
+func webInventorySortURL(basePath string, inventory webResourceInventory, field string) string {
+	filter := inventory.Filter
+	if filter.Sort == field {
+		if filter.Order == "asc" {
+			filter.Order = "desc"
+		} else {
+			filter.Order = "asc"
+		}
+	} else {
+		filter.Sort = field
+		filter.Order = "asc"
+	}
+	filter.Page = 1
+	return webInventoryURL(basePath, filter, 1)
+}
+
+func webInventoryURL(basePath string, filter webResourceInventoryFilter, page int) string {
+	query := url.Values{}
+	if filter.Search != "" {
+		query.Set("q", filter.Search)
+	}
+	if filter.Tenant != "" {
+		query.Set("tenant", filter.Tenant)
+	}
+	if filter.Type != "" {
+		query.Set("type", filter.Type)
+	}
+	if filter.Desired != "" {
+		query.Set("desired", filter.Desired)
+	}
+	if filter.Observed != "" {
+		query.Set("observed", filter.Observed)
+	}
+	query.Set("sort", filter.Sort)
+	query.Set("order", filter.Order)
+	query.Set("pageSize", strconv.Itoa(filter.PageSize))
+	if page > 1 {
+		query.Set("page", strconv.Itoa(page))
+	}
+	return webURL(basePath, "/") + "?" + query.Encode() + "#resources"
 }
 
 func webURL(basePath, path string) string {
