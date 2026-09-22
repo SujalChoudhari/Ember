@@ -165,6 +165,70 @@ func TestWebBucketStoreUploadsListsAndDownloadsObjects(t *testing.T) {
 	}
 }
 
+func TestWebShellKeepsNavigationAndContextAcrossPages(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	root := webRequest(t, handler, http.MethodGet, "/", nil)
+	rootHTML := root.Body.String()
+	if root.Code != http.StatusOK || !strings.Contains(rootHTML, `class="site-header console-shell"`) || !strings.Contains(rootHTML, `aria-label="Primary navigation"`) || !strings.Contains(rootHTML, `aria-label="Context selector"`) || !strings.Contains(rootHTML, `class="navigation-toggle"`) {
+		t.Fatalf("GET / shell = %d %q, want persistent accessible shell", root.Code, rootHTML)
+	}
+	if strings.Contains(rootHTML, `name="search"`) || strings.Contains(rootHTML, `name="query"`) {
+		t.Fatalf("GET / shell = %q, want no unimplemented search control", rootHTML)
+	}
+
+	createdTenant := webForm(t, handler, http.MethodPost, "/tenants", url.Values{
+		"id": {"alpha"}, "displayName": {"Alpha"},
+	})
+	if createdTenant.Code != http.StatusSeeOther {
+		t.Fatalf("POST /tenants = %d location %q, want tenant redirect", createdTenant.Code, createdTenant.Header().Get("Location"))
+	}
+	createdGroup := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources", url.Values{
+		"type": {"group"}, "name": {"operations"}, "desiredState": {"ready"},
+	})
+	if createdGroup.Code != http.StatusSeeOther {
+		t.Fatalf("POST tenant group = %d location %q, want tenant redirect", createdGroup.Code, createdGroup.Header().Get("Location"))
+	}
+	groups, err := operator.ListResources(context.Background(), OperatorPrincipal{TenantID: "alpha"}, 10)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("ListResources(groups) = %#v, %v, want one tenant group", groups, err)
+	}
+	createdBucket := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources", url.Values{
+		"type": {"bucket"}, "name": {"artifacts"}, "parentID": {groups[0].ID}, "desiredState": {"ready"},
+	})
+	if createdBucket.Code != http.StatusSeeOther {
+		t.Fatalf("POST tenant bucket = %d location %q, want resource redirect", createdBucket.Code, createdBucket.Header().Get("Location"))
+	}
+	children, err := operator.ListResources(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: groups[0].ID}, 10)
+	if err != nil || len(children) != 1 {
+		t.Fatalf("ListResources(children) = %#v, %v, want one tenant child", children, err)
+	}
+
+	tenantPage := webRequest(t, handler, http.MethodGet, "/tenants/alpha", nil)
+	tenantHTML := tenantPage.Body.String()
+	if tenantPage.Code != http.StatusOK || !strings.Contains(tenantHTML, `aria-label="Context selector"`) || !strings.Contains(tenantHTML, "Alpha") || !strings.Contains(tenantHTML, `href="/control?section=overview&amp;tenant=alpha`) {
+		t.Fatalf("tenant shell = %d %q, want tenant context and preserved navigation", tenantPage.Code, tenantHTML)
+	}
+
+	resourcePath := "/tenants/alpha/resources/" + url.PathEscape(children[0].ID) + "?scope=" + url.QueryEscape(groups[0].ID)
+	resourcePage := webRequest(t, handler, http.MethodGet, resourcePath, nil)
+	resourceHTML := resourcePage.Body.String()
+	if resourcePage.Code != http.StatusOK || !strings.Contains(resourceHTML, "Alpha") || !strings.Contains(resourceHTML, groups[0].ID) || !strings.Contains(resourceHTML, "scope="+url.QueryEscape(groups[0].ID)) {
+		t.Fatalf("resource shell = %d %q, want visible tenant/scope context and preserved scope links", resourcePage.Code, resourceHTML)
+	}
+
+	style := webRequest(t, handler, http.MethodGet, "/static/style.css", nil)
+	styleHTML := style.Body.String()
+	if style.Code != http.StatusOK || !strings.Contains(styleHTML, ".navigation-toggle") || !strings.Contains(styleHTML, "@media (max-width: 26rem)") {
+		t.Fatalf("shell stylesheet = %d %q, want compact mobile navigation rules", style.Code, styleHTML)
+	}
+}
+
 func TestWebDestructiveActionsRequireConfirmedPOST(t *testing.T) {
 	operator, err := NewFileOperator(t.TempDir(), 64<<20)
 	if err != nil {
