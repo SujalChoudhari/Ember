@@ -8,14 +8,28 @@
   <link rel="stylesheet" href="{{baseURL .BasePath "/static/style.css"}}">
 </head>
 <body>
-  <header class="site-header">
+  <header class="site-header console-shell">
     <div class="shell header-row">
-      <a class="brand" href="{{baseURL .BasePath "/"}}">Ember management</a>
-      <nav aria-label="Primary navigation">
-        <a href="{{baseURL .BasePath "/"}}">Platform</a>
-        <a href="{{controlURL .BasePath "" "" "overview"}}">Control center</a>
-        {{range .Tenants}}<a href="{{tenantURL $.BasePath .ID}}">{{.DisplayName}}</a>{{end}}
-      </nav>
+      <a class="brand" href="{{baseURL .BasePath "/"}}"><span class="brand-name">Ember management</span><span class="brand-context">Control plane</span></a>
+      <details class="navigation-menu">
+        <summary class="navigation-toggle">Menu</summary>
+        <nav class="primary-navigation" aria-label="Primary navigation">
+          <a{{if eq .View "platform"}} aria-current="page"{{end}} href="{{if .TenantID}}{{tenantURL .BasePath .TenantID}}{{else}}{{baseURL .BasePath "/"}}{{end}}">Overview</a>
+          <a{{if eq .View "control"}} aria-current="page"{{end}} href="{{if .SelectedScope}}{{controlURL .BasePath .TenantID .SelectedScope "overview"}}{{else}}{{controlURL .BasePath .TenantID .ParentScope "overview"}}{{end}}">Control center</a>
+          <a href="{{baseURL .BasePath "/"}}#tenants">Tenants</a>
+        </nav>
+      </details>
+      <details class="context-picker">
+        <summary aria-label="Context selector">
+          <span class="context-label">Context</span>
+          <span class="context-current">{{if .Tenant}}{{.Tenant.DisplayName}}{{else}}Platform{{end}}{{if .SelectedScope}} · <code>{{.SelectedScope}}</code>{{else if .ParentScope}} · <code>{{.ParentScope}}</code>{{end}}</span>
+        </summary>
+        <div class="context-menu">
+          <a{{if not .TenantID}} aria-current="page"{{end}} href="{{baseURL .BasePath "/"}}">Platform</a>
+          {{range .Tenants}}<a{{if eq $.TenantID .ID}} aria-current="page"{{end}} href="{{tenantURL $.BasePath .ID}}">{{.DisplayName}}</a>{{else}}<span class="context-empty">No tenants registered</span>{{end}}
+          {{if .TenantID}}<a class="context-action" href="{{if .SelectedScope}}{{controlURL .BasePath .TenantID .SelectedScope "overview"}}{{else}}{{controlURL .BasePath .TenantID .ParentScope "overview"}}{{end}}">Open control center</a>{{end}}
+        </div>
+      </details>
     </div>
   </header>
   <main class="shell">
@@ -45,7 +59,7 @@
         <div class="section-heading"><div><p class="eyebrow">Platform scope</p><h2>Resources</h2></div><span class="badge">{{len .Resources}} shown</span></div>
         {{template "resource-list" .}}
       </section>
-      <section class="card">
+      <section class="card" id="tenants">
         <div class="section-heading"><div><p class="eyebrow">Identity boundary</p><h2>Tenants</h2></div><span class="badge">{{len .Tenants}} registered</span></div>
         {{if .Tenants}}
         <div class="list-grid">
