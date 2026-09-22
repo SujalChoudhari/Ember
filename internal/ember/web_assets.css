@@ -54,8 +54,17 @@ nav { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }
 .context-menu .context-action { border-top: 1px solid var(--line); color: var(--blue-dark); margin-top: .2rem; padding-top: .6rem; }
 .context-empty { color: var(--muted); font-size: .82rem; }
 main { padding: 2rem 0 3rem; }
-.hero { margin-bottom: 1.5rem; }
-h1, h2, h3 { line-height: 1.15; margin-top: 0; }
+.overview-intro { align-items: flex-start; display: flex; gap: 1.5rem; justify-content: space-between; margin-bottom: 1rem; }
+.overview-intro h1 { margin-bottom: .45rem; }
+.overview-intro p:last-child { margin-bottom: 0; max-width: 48rem; }
+.overview-actions { display: flex; flex-wrap: wrap; gap: .55rem; justify-content: flex-end; }
+.platform-summary { margin: 0 0 1rem; }
+.platform-health { margin-bottom: 1rem; }
+.platform-health > p { max-width: 52rem; }
+.health-breakdown { border-top: 1px solid var(--line); display: grid; gap: .65rem; grid-template-columns: repeat(4, minmax(0, 1fr)); padding-top: .8rem; }
+.health-breakdown span { color: var(--muted); font-size: .8rem; }
+.health-breakdown strong { color: var(--ink); font-size: 1.1rem; margin-right: .25rem; }
+.platform-table table { min-width: 44rem; }
 h1 { font-size: clamp(1.8rem, 5vw, 3rem); margin-bottom: .6rem; }
 h2 { font-size: 1.35rem; }
 h3 { font-size: 1rem; margin-bottom: .35rem; }
@@ -230,6 +239,9 @@ th { color: var(--muted); font-size: .76rem; letter-spacing: .04em; text-transfo
   .control-layout { grid-template-columns: 1fr; }
   .control-nav { position: static; }
   .form-grid { grid-template-columns: 1fr; }
+  .overview-intro { flex-direction: column; }
+  .overview-actions { justify-content: flex-start; }
+  .health-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* Control center */
@@ -281,6 +293,7 @@ th { color: var(--muted); font-size: .76rem; letter-spacing: .04em; text-transfo
   .card, .workspace-panel { padding: .9rem; }
   .metric-strip { grid-template-columns: 1fr; }
   .resource-actions, .resource-actions .button { width: 100%; }
+  .overview-actions, .overview-actions .button { width: 100%; }
   .command-bar { grid-template-columns: 1fr; }
   .command-item { border-bottom: 1px solid var(--line); border-right: 0; }
   .command-item:last-child { border-bottom: 0; }

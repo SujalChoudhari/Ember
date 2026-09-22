@@ -229,6 +229,71 @@ func TestWebShellKeepsNavigationAndContextAcrossPages(t *testing.T) {
 	}
 }
 
+func TestWebPlatformOverviewShowsStateFactsAndActionableEmptyState(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	empty := webRequest(t, handler, http.MethodGet, "/", nil)
+	if empty.Code != http.StatusOK {
+		t.Fatalf("empty platform overview = %d %q, want success", empty.Code, empty.Body.String())
+	}
+	for _, want := range []string{"Platform overview", "No tenants yet", "Create a tenant to start"} {
+		if !strings.Contains(empty.Body.String(), want) {
+			t.Fatalf("empty platform overview missing %q: %q", want, empty.Body.String())
+		}
+	}
+
+	if _, err := operator.CreateTenant(context.Background(), OperatorPrincipal{}, models.Tenant{ID: "alpha", DisplayName: "Alpha"}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	resource, err := operator.CreateResource(context.Background(), OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "platform-root"})
+	if err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+	stateStore, ok := operator.resources.(interface {
+		UpdateResourceObservedState(context.Context, string, string, models.ResourceState) (*models.Resource, error)
+	})
+	if !ok {
+		t.Fatal("operator resource plane does not expose observed-state test control")
+	}
+	if _, err := stateStore.UpdateResourceObservedState(context.Background(), "", resource.ID, models.ResourceStateReady); err != nil {
+		t.Fatalf("UpdateObservedState() error = %v", err)
+	}
+	updated, err := operator.UpdateResourceTags(context.Background(), OperatorPrincipal{}, resource.ID, map[string]string{"environment": "test"}, "request-overview", "correlation-overview")
+	if err != nil || updated == nil || updated.Operation == nil {
+		t.Fatalf("UpdateResourceTags() = %#v, %v, want operation evidence", updated, err)
+	}
+
+	overview := webRequest(t, handler, http.MethodGet, "/", nil)
+	html := overview.Body.String()
+	if overview.Code != http.StatusOK {
+		t.Fatalf("populated platform overview = %d %q, want success", overview.Code, html)
+	}
+	for _, want := range []string{
+		"Platform overview",
+		`aria-label="Platform health"`,
+		"Healthy",
+		"1 tenant",
+		"1 resource",
+		"platform-root",
+		`href="/tenants/alpha"`,
+		`href="/resources/` + resource.ID + `"`,
+		updated.Operation.ID,
+		`href="/control?section=overview"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("platform overview missing %q: %q", want, html)
+		}
+	}
+	if strings.Contains(html, "<canvas") || strings.Contains(html, "name=\"search\"") {
+		t.Fatalf("platform overview contains decorative or unimplemented controls: %q", html)
+	}
+}
+
 func TestWebResourceHeaderPreservesHierarchyAndSupportedActions(t *testing.T) {
 	operator, err := NewFileOperator(t.TempDir(), 64<<20)
 	if err != nil {

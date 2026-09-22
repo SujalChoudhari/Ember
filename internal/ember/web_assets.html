@@ -36,13 +36,35 @@
     {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
     {{if .Notice}}<div class="notice success" role="status">{{.Notice}}</div>{{end}}
     {{if eq .View "platform"}}
-      <section class="hero">
-        <p class="eyebrow">Local-first control plane</p>
-        <h1>Platform management</h1>
-        <p>Create tenants and manage platform-root resources without leaving the owned loopback boundary.</p>
+      <section class="overview-intro">
+        <div>
+          <p class="eyebrow">Local-first control plane · Platform management</p>
+          <h1>Platform overview</h1>
+          <p>See the tenants, platform resources, observed state, and recent operations that Ember can verify locally. Use the platform resource management controls below to create and inspect local state.</p>
+        </div>
+        <div class="overview-actions">
+          <a class="button primary" href="{{controlURL .BasePath "" "" "overview"}}">Open control center</a>
+          <a class="button secondary" href="#tenants">View tenants</a>
+        </div>
+      </section>
+      <section class="metric-strip platform-summary" aria-label="Platform summary">
+        <div class="metric"><span class="metric-label">Tenants</span><strong>{{.PlatformOverview.TenantCount}}</strong><span class="metric-note">{{.PlatformOverview.TenantCount}} tenant{{if ne .PlatformOverview.TenantCount 1}}s{{end}} registered</span></div>
+        <div class="metric"><span class="metric-label">Resources</span><strong>{{.PlatformOverview.ResourceCount}}</strong><span class="metric-note">{{.PlatformOverview.ResourceCount}} resource{{if ne .PlatformOverview.ResourceCount 1}}s{{end}} in the overview</span></div>
+        <div class="metric"><span class="metric-label">Recent operations</span><strong>{{.PlatformOverview.OperationCount}}</strong><span class="metric-note">latest bounded records</span></div>
+        <div class="metric"><span class="metric-label">Observed state</span><strong>{{.PlatformOverview.Health.Label}}</strong><span class="metric-note">from listed resources</span></div>
+      </section>
+      <section class="card platform-health" aria-label="Platform health">
+        <div class="section-heading"><div><p class="eyebrow">Observed state</p><h2>Platform health</h2></div><span class="badge">{{.PlatformOverview.Health.Label}}</span></div>
+        <p>{{.PlatformOverview.Health.Detail}}</p>
+        <div class="health-breakdown" aria-label="Observed state counts">
+          <span><strong>{{.PlatformOverview.Health.ReadyCount}}</strong> ready</span>
+          <span><strong>{{.PlatformOverview.Health.PendingCount}}</strong> pending</span>
+          <span><strong>{{.PlatformOverview.Health.FailedCount}}</strong> failed or deleting</span>
+          <span><strong>{{.PlatformOverview.Health.UnknownCount}}</strong> unknown</span>
+        </div>
       </section>
       <div class="grid two-column">
-        <section class="card">
+        <section class="card" id="tenant-form">
           <h2>Register a tenant</h2>
           <form method="post" action="{{baseURL .BasePath "/tenants"}}" class="stack">
             <label>Tenant ID <input name="id" required maxlength="64" pattern="[A-Za-z][A-Za-z0-9_-]*"></label>
@@ -50,24 +72,34 @@
             <button type="submit">Create tenant</button>
           </form>
         </section>
-        <section class="card">
-          <h2>Platform resource</h2>
+        <section class="card" id="platform-resource">
+          <h2>Create a platform resource</h2>
           {{template "resource-form" .}}
         </section>
       </div>
-      <section class="card">
-        <div class="section-heading"><div><p class="eyebrow">Platform scope</p><h2>Resources</h2></div><span class="badge">{{len .Resources}} shown</span></div>
-        {{template "resource-list" .}}
+      <section class="card" id="resources">
+        <div class="section-heading"><div><p class="eyebrow">Resource inventory</p><h2>Resources</h2></div><span class="badge">{{.PlatformOverview.ResourceCount}} shown</span></div>
+        {{if .PlatformOverview.Resources}}
+        <div class="table-wrap platform-table"><table><thead><tr><th>Name</th><th>Tenant</th><th>Type</th><th>Desired</th><th>Observed</th></tr></thead><tbody>
+          {{range .PlatformOverview.Resources}}<tr><td><a href="{{resourceURL $.BasePath .TenantID .Resource.ID .Resource.Spec.ParentID}}">{{.Resource.Spec.Name}}</a><br><code>{{.Resource.ID}}</code></td><td>{{if .TenantID}}<a href="{{tenantURL $.BasePath .TenantID}}">{{.TenantID}}</a>{{else}}Platform{{end}}</td><td>{{resourceTypeLabel .Resource.Spec.Type}}</td><td>{{if .Resource.Spec.DesiredState}}{{.Resource.Spec.DesiredState}}{{else}}unspecified{{end}}</td><td>{{.Resource.ObservedState}}</td></tr>{{end}}
+        </tbody></table></div>
+        {{else}}<div class="empty-state compact-empty"><h3>No platform resources yet</h3><p>Create a resource to populate the inventory and observed-state summary.</p><a class="button secondary" href="#platform-resource">Create a platform resource</a></div>{{end}}
+      </section>
+      <section class="card" id="activity">
+        <div class="section-heading"><div><p class="eyebrow">Traceability</p><h2>Recent operations</h2></div><span class="badge">{{.PlatformOverview.OperationCount}} shown</span></div>
+        {{if .PlatformOverview.Operations}}
+        <div class="table-wrap platform-table"><table><thead><tr><th>Operation</th><th>Resource</th><th>Status</th><th>Outcome</th><th>Updated</th></tr></thead><tbody>
+          {{range .PlatformOverview.Operations}}<tr><td><code>{{.Operation.ID}}</code><br><small><code>{{.Operation.RequestID}}</code></small></td><td><a href="{{resourceURL $.BasePath .TenantID .Operation.ResourceID ""}}"><code>{{.Operation.ResourceID}}</code></a></td><td>{{.Operation.Status}}</td><td>{{.Operation.Outcome}}</td><td>{{formatTime .Operation.UpdatedAt}}</td></tr>{{end}}
+        </tbody></table></div>
+        {{else}}<div class="empty-state compact-empty"><h3>No operations recorded yet</h3><p>Resource mutations appear here with their request identity and outcome.</p><a class="button secondary" href="#resources">Inspect resources</a></div>{{end}}
       </section>
       <section class="card" id="tenants">
-        <div class="section-heading"><div><p class="eyebrow">Identity boundary</p><h2>Tenants</h2></div><span class="badge">{{len .Tenants}} registered</span></div>
+        <div class="section-heading"><div><p class="eyebrow">Identity boundary</p><h2>Tenants</h2></div><span class="badge">{{.PlatformOverview.TenantCount}} registered</span></div>
         {{if .Tenants}}
-        <div class="list-grid">
-          {{range .Tenants}}
-          <article class="list-item"><div><h3><a href="{{tenantURL $.BasePath .ID}}">{{.DisplayName}}</a></h3><p class="muted"><code>{{.ID}}</code> · created {{formatTime .CreatedAt}}</p></div><a class="button secondary" href="{{tenantURL $.BasePath .ID}}">Open</a></article>
-          {{end}}
-        </div>
-        {{else}}<p class="muted">No tenants are registered yet.</p>{{end}}
+        <div class="table-wrap platform-table"><table><thead><tr><th>Tenant</th><th>ID</th><th>Created</th><th></th></tr></thead><tbody>
+          {{range .Tenants}}<tr><td><a href="{{tenantURL $.BasePath .ID}}">{{.DisplayName}}</a></td><td><code>{{.ID}}</code></td><td>{{formatTime .CreatedAt}}</td><td><a class="button secondary" href="{{tenantURL $.BasePath .ID}}">Open tenant</a></td></tr>{{end}}
+        </tbody></table></div>
+        {{else}}<div class="empty-state compact-empty"><h3>No tenants yet</h3><p>Create a tenant to start managing isolated resource state.</p><a class="button secondary" href="#tenant-form">Create a tenant</a></div>{{end}}
       </section>
     {{else if eq .View "tenant"}}
       <section class="hero">

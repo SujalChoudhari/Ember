@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -35,37 +36,66 @@ type webHandler struct {
 }
 
 type webPage struct {
-	BasePath      string
-	View          string
-	Section       string
-	Title         string
-	Tenant        *models.Tenant
-	Tenants       []models.Tenant
-	TenantID      string
-	SelectedScope string
-	Resources     []models.Resource
-	Resource      *models.Resource
-	Children      []models.Resource
-	ParentScope   string
-	Lock          *models.ResourceLock
-	Operations    []models.Operation
-	Audit         []models.AuditEntry
-	Objects       []models.BlobObject
-	ObjectBytes   int64
-	Workloads     []webWorkload
-	Networks      []models.Network
-	Ports         []models.NetworkPort
-	Endpoints     []models.NetworkEndpoint
-	ApplyProgress []models.ApplyProgressRecord
-	Recoveries    []models.RecoveryRecord
-	Topics        []events.Topic
-	Subscriptions []events.Subscription
-	DeadLetters   []queue.DeadLetterRecord
-	QueueStatus   string
-	Metrics       events.MetricsSnapshot
-	EventRuntime  string
-	Notice        string
-	Error         string
+	BasePath         string
+	View             string
+	Section          string
+	Title            string
+	Tenant           *models.Tenant
+	Tenants          []models.Tenant
+	TenantID         string
+	SelectedScope    string
+	Resources        []models.Resource
+	Resource         *models.Resource
+	Children         []models.Resource
+	ParentScope      string
+	Lock             *models.ResourceLock
+	Operations       []models.Operation
+	Audit            []models.AuditEntry
+	Objects          []models.BlobObject
+	ObjectBytes      int64
+	Workloads        []webWorkload
+	Networks         []models.Network
+	Ports            []models.NetworkPort
+	Endpoints        []models.NetworkEndpoint
+	ApplyProgress    []models.ApplyProgressRecord
+	Recoveries       []models.RecoveryRecord
+	Topics           []events.Topic
+	Subscriptions    []events.Subscription
+	DeadLetters      []queue.DeadLetterRecord
+	QueueStatus      string
+	Metrics          events.MetricsSnapshot
+	EventRuntime     string
+	PlatformOverview webPlatformOverview
+	Notice           string
+	Error            string
+}
+
+type webPlatformOverview struct {
+	TenantCount    int
+	ResourceCount  int
+	OperationCount int
+	Resources      []webOverviewResource
+	Operations     []webOverviewOperation
+	Health         webPlatformHealth
+}
+
+type webOverviewResource struct {
+	Resource models.Resource
+	TenantID string
+}
+
+type webOverviewOperation struct {
+	Operation models.Operation
+	TenantID  string
+}
+
+type webPlatformHealth struct {
+	Label        string
+	Detail       string
+	ReadyCount   int
+	PendingCount int
+	FailedCount  int
+	UnknownCount int
 }
 
 type webWorkload struct {
@@ -223,10 +253,79 @@ func (handler *webHandler) platform(writer http.ResponseWriter, request *http.Re
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
+	overview, err := handler.platformOverview(request.Context(), tenants, resources)
+	if err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
 	handler.render(writer, request, http.StatusOK, webPage{
-		View: "platform", Title: "Platform management", Tenants: tenants,
-		Resources: resources,
+		View: "platform", Title: "Platform overview", Tenants: tenants,
+		Resources: resources, PlatformOverview: overview,
 	})
+}
+
+func (handler *webHandler) platformOverview(ctx context.Context, tenants []models.Tenant, platformResources []models.Resource) (webPlatformOverview, error) {
+	overview := webPlatformOverview{TenantCount: len(tenants)}
+	appendResources := func(tenantID string, resources []models.Resource) error {
+		for _, resource := range resources {
+			overview.Resources = append(overview.Resources, webOverviewResource{Resource: resource, TenantID: tenantID})
+			switch resource.ObservedState {
+			case models.ResourceStateReady:
+				overview.Health.ReadyCount++
+			case models.ResourceStatePending:
+				overview.Health.PendingCount++
+			case models.ResourceStateFailed, models.ResourceStateDeleting:
+				overview.Health.FailedCount++
+			default:
+				overview.Health.UnknownCount++
+			}
+
+			operations, err := handler.operator.ListOperations(ctx, OperatorPrincipal{TenantID: tenantID}, resource.ID, persistence.MaxOperationListLimit)
+			if err != nil {
+				return err
+			}
+			for _, operation := range operations {
+				overview.Operations = append(overview.Operations, webOverviewOperation{Operation: operation, TenantID: tenantID})
+			}
+		}
+		return nil
+	}
+	if err := appendResources("", platformResources); err != nil {
+		return webPlatformOverview{}, err
+	}
+	for _, tenant := range tenants {
+		resources, err := handler.operator.ListResources(ctx, OperatorPrincipal{TenantID: tenant.ID}, persistence.MaxResourceListLimit)
+		if err != nil {
+			return webPlatformOverview{}, err
+		}
+		if err := appendResources(tenant.ID, resources); err != nil {
+			return webPlatformOverview{}, err
+		}
+	}
+
+	sort.SliceStable(overview.Operations, func(left, right int) bool {
+		return overview.Operations[left].Operation.UpdatedAt.After(overview.Operations[right].Operation.UpdatedAt)
+	})
+	if len(overview.Operations) > persistence.MaxOperationListLimit {
+		overview.Operations = overview.Operations[:persistence.MaxOperationListLimit]
+	}
+	overview.ResourceCount = len(overview.Resources)
+	overview.OperationCount = len(overview.Operations)
+	switch {
+	case overview.ResourceCount == 0:
+		overview.Health.Label = "No observed state"
+		overview.Health.Detail = "Create a platform or tenant resource to begin observing control-plane state."
+	case overview.Health.FailedCount > 0:
+		overview.Health.Label = "Attention needed"
+		overview.Health.Detail = "One or more resources report a failed or deleting observed state."
+	case overview.Health.PendingCount > 0 || overview.Health.UnknownCount > 0:
+		overview.Health.Label = "Awaiting observed state"
+		overview.Health.Detail = "Some resources have not reported a ready observed state yet."
+	default:
+		overview.Health.Label = "Healthy"
+		overview.Health.Detail = "Every listed resource reports a ready observed state."
+	}
+	return overview, nil
 }
 
 func (handler *webHandler) createTenant(writer http.ResponseWriter, request *http.Request) {
