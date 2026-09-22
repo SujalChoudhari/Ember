@@ -87,6 +87,8 @@ func NewWebHandler(operator *Operator) http.Handler {
 			"resourceDeleteObjectURL": webResourceDeleteObjectURL,
 			"tenantURL":               webTenantURL,
 			"controlURL":              webControlURL,
+			"resourceLockURL":         webResourceLockURL,
+			"resourceTypeLabel":       webResourceTypeLabel,
 			"tagsValue":               webTagsValue,
 			"formatTime":              webFormatTime,
 			"formatBytes":             webFormatBytes,
@@ -429,7 +431,7 @@ func (handler *webHandler) resourcePage(writer http.ResponseWriter, request *htt
 	}
 	handler.render(writer, request, http.StatusOK, webPage{
 		View: "resource", Title: resource.Spec.Name, Tenant: tenant, Tenants: tenants,
-		TenantID: tenantID, Resource: resource, Children: children, ParentScope: principal.ScopeID, Lock: lock,
+		TenantID: tenantID, Resource: resource, Children: children, ParentScope: resource.Spec.ParentID, Lock: lock,
 		Operations: operations, Audit: audit, Objects: objects, ObjectBytes: objectBytes,
 		Notice: webNotice(request),
 	})
@@ -733,6 +735,11 @@ func webResourceDeleteObjectURL(basePath, tenantID, resourceID, scope string) st
 	return webWithScope(base, scope)
 }
 
+func webResourceLockURL(basePath, tenantID, resourceID, scope, action string) string {
+	base := webResourcePath(basePath, tenantID, resourceID) + "/lock/" + url.PathEscape(action)
+	return webWithScope(base, scope)
+}
+
 func webResourceObjectURL(basePath, tenantID, resourceID, scope, objectKey string) string {
 	values := url.Values{"object": {objectKey}}
 	if scope != "" {
@@ -765,6 +772,14 @@ func webWithScope(base, scope string) string {
 
 func resourceParentScope(parentID string) string {
 	return parentID
+}
+
+func webResourceTypeLabel(resourceType models.ResourceType) string {
+	value := string(resourceType)
+	if value == "" {
+		return "Resource"
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
 }
 
 func webTagsValue(tags map[string]string) string {
