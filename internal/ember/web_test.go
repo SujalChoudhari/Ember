@@ -366,6 +366,82 @@ func TestWebResourceHeaderPreservesHierarchyAndSupportedActions(t *testing.T) {
 	}
 }
 
+func TestWebTenantDirectoryShowsIdentityStatusCountsAndSafeActions(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	for _, tenant := range []models.Tenant{
+		{ID: "alpha", DisplayName: "Alpha <Ops>"},
+		{ID: "beta", DisplayName: "Beta"},
+	} {
+		if _, err := operator.CreateTenant(context.Background(), OperatorPrincipal{}, tenant); err != nil {
+			t.Fatalf("CreateTenant(%q) error = %v", tenant.ID, err)
+		}
+	}
+	resource, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha"}, models.ResourceSpec{
+		Type: models.ResourceTypeGroup, Name: "alpha-root", DesiredState: models.ResourceStateReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(alpha) error = %v", err)
+	}
+	alphaResources, err := operator.tenantResourceManager(context.Background(), "alpha")
+	if err != nil {
+		t.Fatalf("tenantResourceManager(alpha) error = %v", err)
+	}
+	if _, err := alphaResources.UpdateResourceObservedState(context.Background(), "", resource.ID, models.ResourceStateReady); err != nil {
+		t.Fatalf("UpdateResourceObservedState() error = %v", err)
+	}
+	if _, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "beta"}, models.ResourceSpec{
+		Type: models.ResourceTypeGroup, Name: "beta-private", DesiredState: models.ResourceStatePending,
+	}); err != nil {
+		t.Fatalf("CreateResource(beta) error = %v", err)
+	}
+
+	page := webRequest(t, handler, http.MethodGet, "/", nil)
+	html := page.Body.String()
+	if page.Code != http.StatusOK {
+		t.Fatalf("GET / = %d %q, want tenant directory", page.Code, html)
+	}
+	for _, want := range []string{
+		`class="card tenant-directory"`,
+		"Alpha &lt;Ops&gt;",
+		"alpha-root",
+		"1 resource",
+		"Ready",
+		"Pending",
+		`action="/tenants/alpha/delete"`,
+		`action="/tenants/beta/delete"`,
+		`href="/tenants/alpha"`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("tenant directory missing %q: %q", want, html)
+		}
+	}
+	if strings.Contains(html, "<Ops>") {
+		t.Fatalf("tenant directory leaked unescaped or cross-tenant data: %q", html)
+	}
+
+	alphaPage := webRequest(t, handler, http.MethodGet, "/tenants/alpha", nil)
+	if alphaPage.Code != http.StatusOK || !strings.Contains(alphaPage.Body.String(), "alpha-root") || strings.Contains(alphaPage.Body.String(), "beta-private") {
+		t.Fatalf("alpha tenant page = %d %q, want isolated tenant entry page", alphaPage.Code, alphaPage.Body.String())
+	}
+	unconfirmed := webForm(t, handler, http.MethodPost, "/tenants/alpha/delete", nil)
+	if unconfirmed.Code != http.StatusConflict || !strings.Contains(unconfirmed.Body.String(), "confirmation") {
+		t.Fatalf("unconfirmed tenant delete = %d %q, want confirmation conflict", unconfirmed.Code, unconfirmed.Body.String())
+	}
+	confirmed := webForm(t, handler, http.MethodPost, "/tenants/alpha/delete", url.Values{"confirm": {"true"}})
+	if confirmed.Code != http.StatusSeeOther || confirmed.Header().Get("Location") != "/" {
+		t.Fatalf("confirmed tenant delete = %d location %q, want root redirect", confirmed.Code, confirmed.Header().Get("Location"))
+	}
+	if _, err := operator.GetTenant(context.Background(), OperatorPrincipal{}, "alpha"); err == nil {
+		t.Fatal("deleted tenant still exists")
+	}
+}
+
 func TestWebDestructiveActionsRequireConfirmedPOST(t *testing.T) {
 	operator, err := NewFileOperator(t.TempDir(), 64<<20)
 	if err != nil {
