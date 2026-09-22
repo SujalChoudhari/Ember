@@ -42,6 +42,8 @@ type webPage struct {
 	Title            string
 	Tenant           *models.Tenant
 	Tenants          []models.Tenant
+	TenantSummary    webTenantSummary
+	TenantSummaries  []webTenantSummary
 	TenantID         string
 	SelectedScope    string
 	Resources        []models.Resource
@@ -71,12 +73,19 @@ type webPage struct {
 }
 
 type webPlatformOverview struct {
-	TenantCount    int
-	ResourceCount  int
-	OperationCount int
-	Resources      []webOverviewResource
-	Operations     []webOverviewOperation
-	Health         webPlatformHealth
+	TenantCount     int
+	ResourceCount   int
+	OperationCount  int
+	Resources       []webOverviewResource
+	Operations      []webOverviewOperation
+	TenantSummaries []webTenantSummary
+	Health          webPlatformHealth
+}
+
+type webTenantSummary struct {
+	Tenant        models.Tenant
+	ResourceCount int
+	Status        string
 }
 
 type webOverviewResource struct {
@@ -260,7 +269,7 @@ func (handler *webHandler) platform(writer http.ResponseWriter, request *http.Re
 	}
 	handler.render(writer, request, http.StatusOK, webPage{
 		View: "platform", Title: "Platform overview", Tenants: tenants,
-		Resources: resources, PlatformOverview: overview,
+		Resources: resources, TenantSummaries: overview.TenantSummaries, PlatformOverview: overview,
 	})
 }
 
@@ -298,6 +307,9 @@ func (handler *webHandler) platformOverview(ctx context.Context, tenants []model
 		if err != nil {
 			return webPlatformOverview{}, err
 		}
+		overview.TenantSummaries = append(overview.TenantSummaries, webTenantSummary{
+			Tenant: tenant, ResourceCount: len(resources), Status: webTenantStatus(resources),
+		})
 		if err := appendResources(tenant.ID, resources); err != nil {
 			return webPlatformOverview{}, err
 		}
@@ -326,6 +338,25 @@ func (handler *webHandler) platformOverview(ctx context.Context, tenants []model
 		overview.Health.Detail = "Every listed resource reports a ready observed state."
 	}
 	return overview, nil
+}
+
+func webTenantStatus(resources []models.Resource) string {
+	if len(resources) == 0 {
+		return "No resources"
+	}
+	pending := false
+	for _, resource := range resources {
+		switch resource.ObservedState {
+		case models.ResourceStateFailed, models.ResourceStateDeleting:
+			return "Attention"
+		case models.ResourceStatePending, models.ResourceStateUnknown, "":
+			pending = true
+		}
+	}
+	if pending {
+		return "Pending"
+	}
+	return "Ready"
 }
 
 func (handler *webHandler) createTenant(writer http.ResponseWriter, request *http.Request) {
@@ -404,6 +435,7 @@ func (handler *webHandler) tenantPage(writer http.ResponseWriter, request *http.
 	handler.render(writer, request, http.StatusOK, webPage{
 		View: "tenant", Title: tenant.DisplayName, Tenant: tenant, TenantID: tenantID,
 		Tenants: tenants, Resources: resources,
+		TenantSummary: webTenantSummary{Tenant: *tenant, ResourceCount: len(resources), Status: webTenantStatus(resources)},
 	})
 }
 

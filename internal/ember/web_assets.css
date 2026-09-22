@@ -65,6 +65,11 @@ main { padding: 2rem 0 3rem; }
 .health-breakdown span { color: var(--muted); font-size: .8rem; }
 .health-breakdown strong { color: var(--ink); font-size: 1.1rem; margin-right: .25rem; }
 .platform-table table { min-width: 44rem; }
+.tenant-actions { align-items: flex-start; display: grid; gap: .45rem; min-width: 12rem; }
+.tenant-action-form { align-items: center; display: flex; flex-wrap: wrap; gap: .45rem; }
+.tenant-action-form .checkbox { color: var(--muted); font-size: .72rem; }
+.tenant-action-form .danger { min-height: 2.2rem; padding: .4rem .6rem; }
+.tenant-status { font-weight: 700; white-space: nowrap; }
 h1 { font-size: clamp(1.8rem, 5vw, 3rem); margin-bottom: .6rem; }
 h2 { font-size: 1.35rem; }
 h3 { font-size: 1rem; margin-bottom: .35rem; }

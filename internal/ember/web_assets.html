@@ -93,11 +93,11 @@
         </tbody></table></div>
         {{else}}<div class="empty-state compact-empty"><h3>No operations recorded yet</h3><p>Resource mutations appear here with their request identity and outcome.</p><a class="button secondary" href="#resources">Inspect resources</a></div>{{end}}
       </section>
-      <section class="card" id="tenants">
+      <section class="card tenant-directory" id="tenants">
         <div class="section-heading"><div><p class="eyebrow">Identity boundary</p><h2>Tenants</h2></div><span class="badge">{{.PlatformOverview.TenantCount}} registered</span></div>
-        {{if .Tenants}}
-        <div class="table-wrap platform-table"><table><thead><tr><th>Tenant</th><th>ID</th><th>Created</th><th></th></tr></thead><tbody>
-          {{range .Tenants}}<tr><td><a href="{{tenantURL $.BasePath .ID}}">{{.DisplayName}}</a></td><td><code>{{.ID}}</code></td><td>{{formatTime .CreatedAt}}</td><td><a class="button secondary" href="{{tenantURL $.BasePath .ID}}">Open tenant</a></td></tr>{{end}}
+        {{if .TenantSummaries}}
+        <div class="table-wrap platform-table"><table><thead><tr><th>Tenant</th><th>ID</th><th>Resources</th><th>Status</th><th>Created</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>
+          {{range .TenantSummaries}}<tr><td><a href="{{tenantURL $.BasePath .Tenant.ID}}">{{.Tenant.DisplayName}}</a></td><td><code>{{.Tenant.ID}}</code></td><td>{{.ResourceCount}} resource{{if ne .ResourceCount 1}}s{{end}}</td><td><span class="tenant-status">{{.Status}}</span></td><td>{{formatTime .Tenant.CreatedAt}}</td><td><div class="tenant-actions"><a class="button secondary" href="{{tenantURL $.BasePath .Tenant.ID}}">Open tenant</a><form method="post" action="{{tenantURL $.BasePath .Tenant.ID}}/delete" class="tenant-action-form"><label class="checkbox"><input type="checkbox" name="confirm" value="true" required> Confirm delete</label><button class="danger" type="submit">Delete</button></form></div></td></tr>{{end}}
         </tbody></table></div>
         {{else}}<div class="empty-state compact-empty"><h3>No tenants yet</h3><p>Create a tenant to start managing isolated resource state.</p><a class="button secondary" href="#tenant-form">Create a tenant</a></div>{{end}}
       </section>
@@ -106,6 +106,11 @@
         <p class="eyebrow">Tenant scope</p>
         <h1>{{.Tenant.DisplayName}}</h1>
         <p><code>{{.Tenant.ID}}</code> · isolated SQLite resource database</p>
+      </section>
+      <section class="metric-strip tenant-summary" aria-label="Tenant summary">
+        <div class="metric"><span class="metric-label">Tenant ID</span><strong><code>{{.TenantSummary.Tenant.ID}}</code></strong><span class="metric-note">stable identity boundary</span></div>
+        <div class="metric"><span class="metric-label">Resources</span><strong>{{.TenantSummary.ResourceCount}}</strong><span class="metric-note">{{.TenantSummary.ResourceCount}} resource{{if ne .TenantSummary.ResourceCount 1}}s{{end}} in this tenant</span></div>
+        <div class="metric"><span class="metric-label">Status</span><strong>{{.TenantSummary.Status}}</strong><span class="metric-note">derived from observed state</span></div>
       </section>
       <div class="grid two-column">
         <section class="card">
