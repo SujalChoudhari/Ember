@@ -30,6 +30,8 @@ var (
 	errInvalidWebForm    = errors.New("invalid web form")
 )
 
+const webTenantActivityLimit = 10
+
 type webHandler struct {
 	operator  *Operator
 	templates *template.Template
@@ -46,7 +48,9 @@ type webPage struct {
 	TenantSummaries  []webTenantSummary
 	TenantID         string
 	SelectedScope    string
+	ScopeOptions     []models.Resource
 	Resources        []models.Resource
+	TenantActivity   []webTenantActivity
 	Resource         *models.Resource
 	Children         []models.Resource
 	ParentScope      string
@@ -85,7 +89,15 @@ type webPlatformOverview struct {
 type webTenantSummary struct {
 	Tenant        models.Tenant
 	ResourceCount int
+	GroupCount    int
+	BucketCount   int
+	WorkloadCount int
 	Status        string
+}
+
+type webTenantActivity struct {
+	Operation models.Operation
+	Resource  models.Resource
 }
 
 type webOverviewResource struct {
@@ -359,6 +371,70 @@ func webTenantStatus(resources []models.Resource) string {
 	return "Ready"
 }
 
+func (handler *webHandler) tenantResourceInventory(ctx context.Context, tenantID string, roots []models.Resource) ([]models.Resource, error) {
+	pending := append([]models.Resource(nil), roots...)
+	inventory := make([]models.Resource, 0, len(roots))
+	visited := make(map[string]struct{})
+	for len(pending) > 0 {
+		resource := pending[0]
+		pending = pending[1:]
+		if _, seen := visited[resource.ID]; seen {
+			continue
+		}
+		visited[resource.ID] = struct{}{}
+		inventory = append(inventory, resource)
+		if resource.Spec.Type != models.ResourceTypeGroup {
+			continue
+		}
+		children, err := handler.operator.ListResources(ctx, OperatorPrincipal{TenantID: tenantID, ScopeID: resource.ID}, persistence.MaxResourceListLimit)
+		if errors.Is(err, persistence.ErrResourceNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		pending = append(pending, children...)
+	}
+	return inventory, nil
+}
+
+func webTenantSummaryFor(tenant models.Tenant, resources []models.Resource) webTenantSummary {
+	summary := webTenantSummary{Tenant: tenant, ResourceCount: len(resources), Status: webTenantStatus(resources)}
+	for _, resource := range resources {
+		switch resource.Spec.Type {
+		case models.ResourceTypeGroup:
+			summary.GroupCount++
+		case models.ResourceTypeBucket:
+			summary.BucketCount++
+		case models.ResourceTypeWorkload:
+			summary.WorkloadCount++
+		}
+	}
+	return summary
+}
+
+func (handler *webHandler) tenantActivity(ctx context.Context, tenantID string, resources []models.Resource) ([]webTenantActivity, error) {
+	activity := make([]webTenantActivity, 0)
+	principal := OperatorPrincipal{TenantID: tenantID}
+	for _, resource := range resources {
+		principal.ScopeID = resource.Spec.ParentID
+		operations, err := handler.operator.ListOperations(ctx, principal, resource.ID, webTenantActivityLimit)
+		if err != nil {
+			return nil, err
+		}
+		for _, operation := range operations {
+			activity = append(activity, webTenantActivity{Operation: operation, Resource: resource})
+		}
+	}
+	sort.SliceStable(activity, func(left, right int) bool {
+		return activity[left].Operation.UpdatedAt.After(activity[right].Operation.UpdatedAt)
+	})
+	if len(activity) > webTenantActivityLimit {
+		activity = activity[:webTenantActivityLimit]
+	}
+	return activity, nil
+}
+
 func (handler *webHandler) createTenant(writer http.ResponseWriter, request *http.Request) {
 	if err := request.ParseForm(); err != nil {
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
@@ -432,10 +508,40 @@ func (handler *webHandler) tenantPage(writer http.ResponseWriter, request *http.
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
+	inventory, err := handler.tenantResourceInventory(request.Context(), tenantID, resources)
+	if err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
+	scopeOptions := make([]models.Resource, 0)
+	for _, resource := range inventory {
+		if resource.Spec.Type == models.ResourceTypeGroup {
+			scopeOptions = append(scopeOptions, resource)
+		}
+	}
+	selectedScope := strings.TrimSpace(request.URL.Query().Get("scope"))
+	if selectedScope != "" {
+		validScope := false
+		for _, scope := range scopeOptions {
+			if scope.ID == selectedScope {
+				validScope = true
+				break
+			}
+		}
+		if !validScope {
+			handler.renderError(writer, request, http.StatusBadRequest, errors.New("selected scope is not a tenant group"))
+			return
+		}
+	}
+	activity, err := handler.tenantActivity(request.Context(), tenantID, inventory)
+	if err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
 	handler.render(writer, request, http.StatusOK, webPage{
 		View: "tenant", Title: tenant.DisplayName, Tenant: tenant, TenantID: tenantID,
-		Tenants: tenants, Resources: resources,
-		TenantSummary: webTenantSummary{Tenant: *tenant, ResourceCount: len(resources), Status: webTenantStatus(resources)},
+		Tenants: tenants, Resources: resources, ScopeOptions: scopeOptions, SelectedScope: selectedScope,
+		TenantActivity: activity, TenantSummary: webTenantSummaryFor(*tenant, inventory),
 	})
 }
 

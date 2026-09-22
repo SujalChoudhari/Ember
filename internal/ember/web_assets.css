@@ -65,6 +65,16 @@ main { padding: 2rem 0 3rem; }
 .health-breakdown span { color: var(--muted); font-size: .8rem; }
 .health-breakdown strong { color: var(--ink); font-size: 1.1rem; margin-right: .25rem; }
 .platform-table table { min-width: 44rem; }
+.tenant-overview { margin-bottom: 1rem; }
+.tenant-overview h1 { margin-bottom: .45rem; }
+.tenant-overview p:last-child { color: var(--muted); margin-bottom: 0; }
+.tenant-scope-card { border-left: 4px solid var(--blue); }
+.scope-selector { align-items: end; display: flex; flex-wrap: wrap; gap: .7rem; }
+.scope-selector label { flex: 1 1 18rem; font-size: .78rem; }
+.scope-selector select { min-height: 2.5rem; }
+.scope-selector button:disabled { background: var(--line-strong); border-color: var(--line-strong); color: var(--muted); cursor: not-allowed; }
+.tenant-health p { color: var(--muted); max-width: 52rem; }
+.tenant-activity table { min-width: 48rem; }
 .tenant-actions { align-items: flex-start; display: grid; gap: .45rem; min-width: 12rem; }
 .tenant-action-form { align-items: center; display: flex; flex-wrap: wrap; gap: .45rem; }
 .tenant-action-form .checkbox { color: var(--muted); font-size: .72rem; }

@@ -442,6 +442,79 @@ func TestWebTenantDirectoryShowsIdentityStatusCountsAndSafeActions(t *testing.T)
 	}
 }
 
+func TestWebTenantOverviewShowsStateSummaryActivityAndExplicitScopeSelection(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	if _, err := operator.CreateTenant(context.Background(), OperatorPrincipal{}, models.Tenant{ID: "alpha", DisplayName: "Alpha"}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	group, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha"}, models.ResourceSpec{
+		Type: models.ResourceTypeGroup, Name: "operations", DesiredState: models.ResourceStateReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(group) error = %v", err)
+	}
+	bucket, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: group.ID}, models.ResourceSpec{
+		Type: models.ResourceTypeBucket, Name: "artifacts", ParentID: group.ID, DesiredState: models.ResourceStateReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(bucket) error = %v", err)
+	}
+	if _, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: group.ID}, models.ResourceSpec{
+		Type: models.ResourceTypeWorkload, Name: "worker", ParentID: group.ID, DesiredState: models.ResourceStateReady,
+	}); err != nil {
+		t.Fatalf("CreateResource(workload) error = %v", err)
+	}
+	activity, err := operator.UpdateResourceTags(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: group.ID}, bucket.ID, map[string]string{"environment": "test"}, "tenant-overview-request", "tenant-overview-correlation")
+	if err != nil || activity == nil || activity.Operation == nil {
+		t.Fatalf("UpdateResourceTags() = %#v, %v, want activity operation", activity, err)
+	}
+
+	page := webRequest(t, handler, http.MethodGet, "/tenants/alpha", nil)
+	html := page.Body.String()
+	if page.Code != http.StatusOK {
+		t.Fatalf("GET /tenants/alpha = %d %q, want tenant overview", page.Code, html)
+	}
+	for _, want := range []string{
+		"Tenant overview",
+		"Alpha",
+		"3 resources in this tenant",
+		`<span class="metric-label">Groups</span><strong>1</strong>`,
+		`<span class="metric-label">Buckets</span><strong>1</strong>`,
+		`<span class="metric-label">Workloads</span><strong>1</strong>`,
+		"Recent activity",
+		activity.Operation.ID,
+		"artifacts",
+		`action="/control"`,
+		`name="tenant" value="alpha"`,
+		`name="scope" required`,
+		`value="` + group.ID + `"`,
+		"Choose a group scope",
+		"No group scope is selected",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("tenant overview missing %q: %q", want, html)
+		}
+	}
+
+	scopedPage := webRequest(t, handler, http.MethodGet, "/tenants/alpha?scope="+url.QueryEscape(group.ID), nil)
+	scopedHTML := scopedPage.Body.String()
+	if scopedPage.Code != http.StatusOK || !strings.Contains(scopedHTML, `option value="`+group.ID+`" selected`) || !strings.Contains(scopedHTML, group.ID) {
+		t.Fatalf("scoped tenant overview = %d %q, want selected group context", scopedPage.Code, scopedHTML)
+	}
+
+	controlPage := webRequest(t, handler, http.MethodGet, "/control?tenant=alpha&scope="+url.QueryEscape(group.ID)+"&section=overview", nil)
+	controlHTML := controlPage.Body.String()
+	if controlPage.Code != http.StatusOK || !strings.Contains(controlHTML, "Alpha") || !strings.Contains(controlHTML, group.ID) || !strings.Contains(controlHTML, "Tenant:") || !strings.Contains(controlHTML, "Scope:") {
+		t.Fatalf("scoped control center = %d %q, want explicit tenant and group context", controlPage.Code, controlHTML)
+	}
+}
+
 func TestWebDestructiveActionsRequireConfirmedPOST(t *testing.T) {
 	operator, err := NewFileOperator(t.TempDir(), 64<<20)
 	if err != nil {
