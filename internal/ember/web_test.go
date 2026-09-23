@@ -506,8 +506,8 @@ func TestWebTenantDirectoryShowsIdentityStatusCountsAndSafeActions(t *testing.T)
 		t.Fatalf("alpha tenant page = %d %q, want isolated tenant entry page", alphaPage.Code, alphaPage.Body.String())
 	}
 	unconfirmed := webForm(t, handler, http.MethodPost, "/tenants/alpha/delete", nil)
-	if unconfirmed.Code != http.StatusConflict || !strings.Contains(unconfirmed.Body.String(), "confirmation") {
-		t.Fatalf("unconfirmed tenant delete = %d %q, want confirmation conflict", unconfirmed.Code, unconfirmed.Body.String())
+	if unconfirmed.Code != http.StatusOK || !strings.Contains(unconfirmed.Body.String(), "Review before continuing") || !strings.Contains(unconfirmed.Body.String(), "Confirm tenant deletion") {
+		t.Fatalf("unconfirmed tenant delete = %d %q, want confirmation review", unconfirmed.Code, unconfirmed.Body.String())
 	}
 	confirmed := webForm(t, handler, http.MethodPost, "/tenants/alpha/delete", url.Values{"confirm": {"true"}})
 	if confirmed.Code != http.StatusSeeOther || confirmed.Header().Get("Location") != "/" {
@@ -611,8 +611,8 @@ func TestWebDestructiveActionsRequireConfirmedPOST(t *testing.T) {
 	}
 
 	withoutConfirmation := webForm(t, handler, http.MethodPost, "/resources/"+resource[0].ID+"/delete", nil)
-	if withoutConfirmation.Code != http.StatusConflict || !strings.Contains(withoutConfirmation.Body.String(), "confirmation") {
-		t.Fatalf("unconfirmed delete = %d %q, want confirmation conflict", withoutConfirmation.Code, withoutConfirmation.Body.String())
+	if withoutConfirmation.Code != http.StatusOK || !strings.Contains(withoutConfirmation.Body.String(), "Review before continuing") || !strings.Contains(withoutConfirmation.Body.String(), "Confirm resource deletion") {
+		t.Fatalf("unconfirmed delete = %d %q, want confirmation review", withoutConfirmation.Code, withoutConfirmation.Body.String())
 	}
 	confirmed := webForm(t, handler, http.MethodPost, "/resources/"+resource[0].ID+"/delete", url.Values{"confirm": {"true"}})
 	if confirmed.Code != http.StatusSeeOther || confirmed.Header().Get("Location") != "/" {
@@ -864,6 +864,127 @@ func TestWebResourceLocksExplainScopeTokenAndMutationBoundaries(t *testing.T) {
 	unlocked := webRequest(t, handler, http.MethodGet, released.Header().Get("Location"), nil)
 	if unlocked.Code != http.StatusOK || !strings.Contains(unlocked.Body.String(), "unlocked") || strings.Contains(unlocked.Body.String(), lockToken) {
 		t.Fatalf("unlocked resource page = %d %q, want unlocked redacted state", unlocked.Code, unlocked.Body.String())
+	}
+}
+
+func TestWebDestructiveActionsUseReviewPages(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+	ctx := context.Background()
+
+	if _, err := operator.CreateTenant(ctx, OperatorPrincipal{}, models.Tenant{ID: "alpha", DisplayName: "Alpha"}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	root, err := operator.CreateResource(ctx, OperatorPrincipal{TenantID: "alpha"}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "Operations"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	bucket, err := operator.CreateResource(ctx, OperatorPrincipal{TenantID: "alpha", ScopeID: root.ID}, models.ResourceSpec{Type: models.ResourceTypeBucket, Name: "Artifacts", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("CreateResource(bucket) error = %v", err)
+	}
+	if _, err := operator.PutBlob(ctx, OperatorPrincipal{TenantID: "alpha", ScopeID: root.ID}, bucket.ID, "release.txt", []byte("release")); err != nil {
+		t.Fatalf("PutBlob() error = %v", err)
+	}
+	workload, err := operator.CreateResource(ctx, OperatorPrincipal{TenantID: "alpha", ScopeID: root.ID}, models.ResourceSpec{Type: models.ResourceTypeWorkload, Name: "Worker", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("CreateResource(workload) error = %v", err)
+	}
+
+	resourcePath := "/tenants/alpha/resources/" + root.ID + "/delete"
+	resourceReview := webForm(t, handler, http.MethodPost, resourcePath, url.Values{})
+	resourceHTML := resourceReview.Body.String()
+	if resourceReview.Code != http.StatusOK || !strings.Contains(resourceHTML, "Confirm resource deletion") || !strings.Contains(resourceHTML, "Operations") || !strings.Contains(resourceHTML, root.ID) || !strings.Contains(resourceHTML, "child resource") || !strings.Contains(resourceHTML, "Cancel") || !strings.Contains(resourceHTML, "name=\"confirm\" value=\"true\"") {
+		t.Fatalf("resource review = %d %q, want exact target, impact, and POST confirmation", resourceReview.Code, resourceHTML)
+	}
+	if strings.Contains(resourceHTML, "resource is read-only") {
+		t.Fatalf("resource review = %q, want no mutation before confirmation", resourceHTML)
+	}
+	if _, err := operator.GetResource(ctx, OperatorPrincipal{TenantID: "alpha"}, root.ID); err != nil {
+		t.Fatalf("resource changed during review: %v", err)
+	}
+	if !strings.Contains(resourceHTML, `href="/tenants/alpha/resources/`+root.ID+`"`) {
+		t.Fatalf("resource review = %q, want cancel link to the resource context", resourceHTML)
+	}
+
+	workloadReview := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources/"+workload.ID+"/delete?scope="+url.QueryEscape(root.ID), url.Values{})
+	if workloadReview.Code != http.StatusOK || !strings.Contains(workloadReview.Body.String(), "Confirm resource deletion") || !strings.Contains(workloadReview.Body.String(), "Workload resource") || !strings.Contains(workloadReview.Body.String(), "Worker") {
+		t.Fatalf("workload review = %d %q, want workload target and review page", workloadReview.Code, workloadReview.Body.String())
+	}
+
+	bucketPath := "/tenants/alpha/resources/" + bucket.ID + "/objects/delete?scope=" + url.QueryEscape(root.ID)
+	blobReview := webForm(t, handler, http.MethodPost, bucketPath, url.Values{"objectKey": {"release.txt"}})
+	blobHTML := blobReview.Body.String()
+	if blobReview.Code != http.StatusOK || !strings.Contains(blobHTML, "Confirm object deletion") || !strings.Contains(blobHTML, "release.txt") || !strings.Contains(blobHTML, "Artifacts") || !strings.Contains(blobHTML, "bucket remains") {
+		t.Fatalf("blob review = %d %q, want exact object target and impact", blobReview.Code, blobHTML)
+	}
+	if _, err := operator.GetBlob(ctx, OperatorPrincipal{TenantID: "alpha", ScopeID: root.ID}, bucket.ID, "release.txt"); err != nil {
+		t.Fatalf("blob changed during review: %v", err)
+	}
+	if !strings.Contains(blobHTML, `href="/tenants/alpha/resources/`+bucket.ID+`?scope=`+url.QueryEscape(root.ID)+`"`) {
+		t.Fatalf("blob review = %q, want cancel link to the bucket context", blobHTML)
+	}
+
+	tenantReview := webForm(t, handler, http.MethodPost, "/tenants/alpha/delete", url.Values{})
+	tenantHTML := tenantReview.Body.String()
+	if tenantReview.Code != http.StatusOK || !strings.Contains(tenantHTML, "Confirm tenant deletion") || !strings.Contains(tenantHTML, "Alpha") || !strings.Contains(tenantHTML, "tenant database") || !strings.Contains(tenantHTML, `href="/tenants/alpha"`) {
+		t.Fatalf("tenant review = %d %q, want exact tenant target, impact, and cancel", tenantReview.Code, tenantHTML)
+	}
+	if _, err := operator.GetTenant(ctx, OperatorPrincipal{}, "alpha"); err != nil {
+		t.Fatalf("tenant changed during review: %v", err)
+	}
+}
+
+func TestWebControlDestructiveActionsUseReviewPages(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+	ctx := context.Background()
+	principal := OperatorPrincipal{TenantID: "alpha", ScopeID: "group-alpha"}
+
+	if _, err := operator.CreateTenant(ctx, OperatorPrincipal{}, models.Tenant{ID: "alpha", DisplayName: "Alpha"}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	group, err := operator.CreateResource(ctx, OperatorPrincipal{TenantID: "alpha"}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "Operations"})
+	if err != nil {
+		t.Fatalf("CreateResource(group) error = %v", err)
+	}
+	principal.ScopeID = group.ID
+	network, err := operator.CreateNetwork(ctx, principal, "private")
+	if err != nil {
+		t.Fatalf("CreateNetwork() error = %v", err)
+	}
+	topic, err := operator.CreateEventTopic(ctx, principal, "owner", "audit")
+	if err != nil {
+		t.Fatalf("CreateEventTopic() error = %v", err)
+	}
+
+	networkValues := url.Values{"tenant": {"alpha"}, "scope": {group.ID}, "section": {"networks"}, "networkID": {network.ID}}
+	networkReview := webForm(t, handler, http.MethodPost, "/control/network-delete", networkValues)
+	if networkReview.Code != http.StatusOK || !strings.Contains(networkReview.Body.String(), "Confirm network deletion") || !strings.Contains(networkReview.Body.String(), "private") || !strings.Contains(networkReview.Body.String(), "allocated ports and endpoints") || !strings.Contains(networkReview.Body.String(), "section=networks") {
+		t.Fatalf("network review = %d %q, want target, impact, and scoped cancel", networkReview.Code, networkReview.Body.String())
+	}
+	if _, err := operator.GetNetwork(ctx, principal, network.ID); err != nil {
+		t.Fatalf("network changed during review: %v", err)
+	}
+	if got := webRequest(t, handler, http.MethodGet, "/control/network-delete", nil); got.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /control/network-delete = %d, want method rejection", got.Code)
+	}
+
+	topicValues := url.Values{"tenant": {"alpha"}, "scope": {group.ID}, "section": {"events"}, "topicID": {topic.ID}}
+	topicReview := webForm(t, handler, http.MethodPost, "/control/topic-delete", topicValues)
+	if topicReview.Code != http.StatusOK || !strings.Contains(topicReview.Body.String(), "Confirm topic deletion") || !strings.Contains(topicReview.Body.String(), "audit") || !strings.Contains(topicReview.Body.String(), "local event topology") {
+		t.Fatalf("topic review = %d %q, want target and impact", topicReview.Code, topicReview.Body.String())
+	}
+	if topics, err := operator.ListEventTopics(ctx, principal, 10); err != nil || len(topics) != 1 || topics[0].ID != topic.ID {
+		t.Fatalf("topics after review = %#v, %v, want unchanged topic", topics, err)
 	}
 }
 

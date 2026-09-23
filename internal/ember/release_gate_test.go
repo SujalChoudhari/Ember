@@ -119,8 +119,8 @@ func TestTenantResourceReleaseGatePreservesIsolationAcrossRestoreAndWeb(t *testi
 		t.Fatalf("gamma page = %d %q, want tenant-scoped resource management", gammaPage.Code, gammaPage.Body.String())
 	}
 	withoutConfirmation := webForm(t, handler, http.MethodPost, "/tenants/gamma/delete", nil)
-	if withoutConfirmation.Code != http.StatusConflict || !strings.Contains(withoutConfirmation.Body.String(), "confirmation") {
-		t.Fatalf("unconfirmed tenant delete = %d %q, want confirmation conflict", withoutConfirmation.Code, withoutConfirmation.Body.String())
+	if withoutConfirmation.Code != http.StatusOK || !strings.Contains(withoutConfirmation.Body.String(), "Review before continuing") || !strings.Contains(withoutConfirmation.Body.String(), "Confirm tenant deletion") {
+		t.Fatalf("unconfirmed tenant delete = %d %q, want confirmation review", withoutConfirmation.Code, withoutConfirmation.Body.String())
 	}
 	confirmed := webForm(t, handler, http.MethodPost, "/tenants/gamma/delete", url.Values{"confirm": {"true"}})
 	if confirmed.Code != http.StatusSeeOther || confirmed.Header().Get("Location") != "/" {

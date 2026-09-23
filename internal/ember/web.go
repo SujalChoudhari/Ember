@@ -74,6 +74,22 @@ type webPage struct {
 	PlatformOverview webPlatformOverview
 	Notice           string
 	Error            string
+	Confirmation     *webConfirmation
+}
+
+type webConfirmation struct {
+	Title       string
+	Target      string
+	Impact      string
+	ActionURL   string
+	CancelURL   string
+	SubmitLabel string
+	Fields      []webConfirmationField
+}
+
+type webConfirmationField struct {
+	Name  string
+	Value string
 }
 
 type webPlatformOverview struct {
@@ -605,7 +621,25 @@ func (handler *webHandler) deleteTenant(writer http.ResponseWriter, request *htt
 		return
 	}
 	if !webConfirmed(request) {
-		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
+		tenant, err := handler.operator.GetTenant(request.Context(), OperatorPrincipal{}, tenantID)
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		resources, err := handler.operator.ListResources(request.Context(), OperatorPrincipal{TenantID: tenantID}, persistence.MaxResourceListLimit)
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		handler.renderConfirmation(writer, request, webConfirmation{
+			Title:       "Confirm tenant deletion",
+			Target:      fmt.Sprintf("%s (%s)", tenant.DisplayName, tenant.ID),
+			Impact:      fmt.Sprintf("Delete the tenant database and its %d resource(s). This action cannot be undone.", len(resources)),
+			ActionURL:   webCurrentRequestURL(request),
+			CancelURL:   webTenantURL(webBasePath(request), tenantID),
+			SubmitLabel: "Delete tenant",
+			Fields:      webConfirmationFields(request),
+		})
 		return
 	}
 	if err := handler.operator.DeleteTenant(request.Context(), OperatorPrincipal{}, tenantID, true); err != nil {
@@ -797,11 +831,33 @@ func (handler *webHandler) deleteResource(writer http.ResponseWriter, request *h
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
-	if !webConfirmed(request) {
-		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
+	principal := OperatorPrincipal{TenantID: tenantID, ScopeID: request.URL.Query().Get("scope")}
+	resource, err := handler.operator.GetResource(request.Context(), principal, resourceID)
+	if err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
-	principal := OperatorPrincipal{TenantID: tenantID, ScopeID: request.URL.Query().Get("scope")}
+	if !webConfirmed(request) {
+		children, childErr := handler.operator.ListResources(request.Context(), OperatorPrincipal{TenantID: tenantID, ScopeID: resource.ID}, persistence.MaxResourceListLimit)
+		if childErr != nil && !errors.Is(childErr, persistence.ErrResourceNotFound) {
+			handler.renderError(writer, request, webStatus(childErr), childErr)
+			return
+		}
+		impact := "Remove this resource record and its owned state."
+		if len(children) > 0 {
+			impact = fmt.Sprintf("Remove this resource record and its owned state. Ember will refuse deletion while its %d child resource(s) remain.", len(children))
+		}
+		handler.renderConfirmation(writer, request, webConfirmation{
+			Title:       "Confirm resource deletion",
+			Target:      fmt.Sprintf("%s resource %q (%s)", webResourceTypeLabel(resource.Spec.Type), resource.Spec.Name, resource.ID),
+			Impact:      impact,
+			ActionURL:   webCurrentRequestURL(request),
+			CancelURL:   webResourceURL(webBasePath(request), tenantID, resourceID, principal.ScopeID),
+			SubmitLabel: "Delete resource",
+			Fields:      webConfirmationFields(request),
+		})
+		return
+	}
 	if err := handler.operator.DeleteResource(request.Context(), principal, resourceID); err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
@@ -880,11 +936,41 @@ func (handler *webHandler) deleteBlob(writer http.ResponseWriter, request *http.
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
+	principal := OperatorPrincipal{TenantID: tenantID, ScopeID: request.URL.Query().Get("scope")}
 	if !webConfirmed(request) {
-		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
+		bucket, err := handler.operator.GetResource(request.Context(), principal, bucketID)
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		objectKey := request.FormValue("objectKey")
+		objects, err := handler.operator.ListBlobs(request.Context(), principal, bucketID, persistence.MaxBlobListLimit)
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		var object *models.BlobObject
+		for index := range objects.Objects {
+			if objects.Objects[index].Key == objectKey {
+				object = &objects.Objects[index]
+				break
+			}
+		}
+		if object == nil {
+			handler.renderError(writer, request, http.StatusNotFound, errors.New("object not found"))
+			return
+		}
+		handler.renderConfirmation(writer, request, webConfirmation{
+			Title:       "Confirm object deletion",
+			Target:      fmt.Sprintf("Object %q in bucket %q (%s)", object.Key, bucket.Spec.Name, bucket.ID),
+			Impact:      fmt.Sprintf("Delete this %s object. The bucket remains and other objects are untouched.", webFormatBytes(object.Size)),
+			ActionURL:   webCurrentRequestURL(request),
+			CancelURL:   webResourceURL(webBasePath(request), tenantID, bucketID, principal.ScopeID),
+			SubmitLabel: "Delete object",
+			Fields:      webConfirmationFields(request),
+		})
 		return
 	}
-	principal := OperatorPrincipal{TenantID: tenantID, ScopeID: request.URL.Query().Get("scope")}
 	if err := handler.operator.DeleteBlob(request.Context(), principal, bucketID, request.FormValue("objectKey")); err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
@@ -911,6 +997,37 @@ func webConfirmed(request *http.Request) bool {
 	value := request.FormValue("confirm")
 	confirmed, err := strconv.ParseBool(value)
 	return err == nil && confirmed
+}
+
+func (handler *webHandler) renderConfirmation(writer http.ResponseWriter, request *http.Request, confirmation webConfirmation) {
+	handler.render(writer, request, http.StatusOK, webPage{
+		View: "confirmation", Title: confirmation.Title, Confirmation: &confirmation,
+	})
+}
+
+func webCurrentRequestURL(request *http.Request) string {
+	path := webURL(webBasePath(request), request.URL.Path)
+	if request.URL.RawQuery == "" {
+		return path
+	}
+	return path + "?" + request.URL.RawQuery
+}
+
+func webConfirmationFields(request *http.Request) []webConfirmationField {
+	keys := make([]string, 0, len(request.PostForm))
+	for key := range request.PostForm {
+		if key != "confirm" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	fields := make([]webConfirmationField, 0, len(request.PostForm))
+	for _, key := range keys {
+		for _, value := range request.PostForm[key] {
+			fields = append(fields, webConfirmationField{Name: key, Value: value})
+		}
+	}
+	return fields
 }
 
 func webNotice(request *http.Request) string {
