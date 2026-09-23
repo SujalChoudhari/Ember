@@ -42,15 +42,15 @@ func TestWebManagementFlowKeepsPlatformAndTenantResourcesSeparate(t *testing.T) 
 	platform := webForm(t, handler, http.MethodPost, "/resources", url.Values{
 		"type": {"group"}, "name": {"platform-root"}, "desiredState": {"ready"},
 	})
-	if platform.Code != http.StatusSeeOther || platform.Header().Get("Location") != "/" {
-		t.Fatalf("POST /resources = %d location %q, want root redirect", platform.Code, platform.Header().Get("Location"))
+	if platform.Code != http.StatusSeeOther || !strings.HasPrefix(platform.Header().Get("Location"), "/resources/") {
+		t.Fatalf("POST /resources = %d location %q, want inspectable resource redirect", platform.Code, platform.Header().Get("Location"))
 	}
 
 	tenantResource := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources", url.Values{
 		"type": {"group"}, "name": {"tenant-root"}, "desiredState": {"ready"},
 	})
-	if tenantResource.Code != http.StatusSeeOther || tenantResource.Header().Get("Location") != "/tenants/alpha" {
-		t.Fatalf("POST tenant resource = %d location %q, want tenant redirect", tenantResource.Code, tenantResource.Header().Get("Location"))
+	if tenantResource.Code != http.StatusSeeOther || !strings.HasPrefix(tenantResource.Header().Get("Location"), "/tenants/alpha/resources/") {
+		t.Fatalf("POST tenant resource = %d location %q, want inspectable resource redirect", tenantResource.Code, tenantResource.Header().Get("Location"))
 	}
 
 	var tenants []models.Tenant
@@ -104,8 +104,8 @@ func TestWebBucketStoreUploadsListsAndDownloadsObjects(t *testing.T) {
 		t.Fatalf("ListResources(groups) = %#v, %v, want one group", groups, err)
 	}
 
-	bucketResponse := webForm(t, handler, http.MethodPost, "/resources", url.Values{
-		"type": {"bucket"}, "name": {"assets"}, "parentID": {groups[0].ID},
+	bucketResponse := webForm(t, handler, http.MethodPost, "/resources/"+groups[0].ID, url.Values{
+		"type": {"bucket"}, "name": {"assets"},
 	})
 	if bucketResponse.Code != http.StatusSeeOther {
 		t.Fatalf("create bucket = %d %q, want redirect", bucketResponse.Code, bucketResponse.Body.String())
@@ -198,8 +198,8 @@ func TestWebShellKeepsNavigationAndContextAcrossPages(t *testing.T) {
 	if err != nil || len(groups) != 1 {
 		t.Fatalf("ListResources(groups) = %#v, %v, want one tenant group", groups, err)
 	}
-	createdBucket := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources", url.Values{
-		"type": {"bucket"}, "name": {"artifacts"}, "parentID": {groups[0].ID}, "desiredState": {"ready"},
+	createdBucket := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources/"+groups[0].ID, url.Values{
+		"type": {"bucket"}, "name": {"artifacts"}, "desiredState": {"ready"},
 	})
 	if createdBucket.Code != http.StatusSeeOther {
 		t.Fatalf("POST tenant bucket = %d location %q, want resource redirect", createdBucket.Code, createdBucket.Header().Get("Location"))
@@ -699,6 +699,93 @@ func TestWebResourceInventoryFiltersSortsAndPaginatesHierarchy(t *testing.T) {
 	styleHTML := style.Body.String()
 	if style.Code != http.StatusOK || !strings.Contains(styleHTML, ".inventory-table") || !strings.Contains(styleHTML, "overflow-x: auto") {
 		t.Fatalf("inventory stylesheet = %d %q, want horizontally scrollable mobile table", style.Code, styleHTML)
+	}
+}
+
+func TestWebResourceCreationUsesContextAndNavigatesToInspectableResource(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	for _, tenant := range []models.Tenant{
+		{ID: "alpha", DisplayName: "Alpha"},
+		{ID: "beta", DisplayName: "Beta"},
+	} {
+		if _, err := operator.CreateTenant(context.Background(), OperatorPrincipal{}, tenant); err != nil {
+			t.Fatalf("CreateTenant(%q) error = %v", tenant.ID, err)
+		}
+	}
+
+	createdGroup := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources", url.Values{
+		"type": {"group"}, "name": {"operations"}, "desiredState": {"ready"},
+		"providerNamespace": {"ember.local"}, "providerType": {"control.group"}, "providerVersion": {"v1"},
+	})
+	if createdGroup.Code != http.StatusSeeOther || !strings.HasPrefix(createdGroup.Header().Get("Location"), "/tenants/alpha/resources/") {
+		t.Fatalf("create group = %d location %q, want inspectable tenant resource redirect", createdGroup.Code, createdGroup.Header().Get("Location"))
+	}
+	groupPage := webRequest(t, handler, http.MethodGet, createdGroup.Header().Get("Location"), nil)
+	groupHTML := groupPage.Body.String()
+	for _, want := range []string{"Alpha", "ember.local", "control.group", "v1", "Create child resource", "Group", "Bucket", "Workload"} {
+		if groupPage.Code != http.StatusOK || !strings.Contains(groupHTML, want) {
+			t.Fatalf("created group page missing %q: %d %q", want, groupPage.Code, groupHTML)
+		}
+	}
+
+	groups, err := operator.ListResources(context.Background(), OperatorPrincipal{TenantID: "alpha"}, 10)
+	if err != nil || len(groups) != 1 {
+		t.Fatalf("ListResources(groups) = %#v, %v, want one group", groups, err)
+	}
+	createdOther := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources", url.Values{
+		"type": {"group"}, "name": {"other"}, "desiredState": {"ready"},
+	})
+	if createdOther.Code != http.StatusSeeOther {
+		t.Fatalf("create second group = %d location %q, want redirect", createdOther.Code, createdOther.Header().Get("Location"))
+	}
+	groups, err = operator.ListResources(context.Background(), OperatorPrincipal{TenantID: "alpha"}, 10)
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("ListResources(groups after second create) = %#v, %v, want two groups", groups, err)
+	}
+
+	child := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources/"+groups[0].ID, url.Values{
+		"type": {"bucket"}, "name": {"artifacts"}, "desiredState": {"ready"},
+		"parentID": {groups[1].ID}, "tenantID": {"beta"},
+		"providerNamespace": {"storage.local"}, "providerType": {"blob.bucket"}, "providerVersion": {"v1"},
+	})
+	expectedChildPrefix := "/tenants/alpha/resources/"
+	if child.Code != http.StatusSeeOther || !strings.HasPrefix(child.Header().Get("Location"), expectedChildPrefix) || !strings.Contains(child.Header().Get("Location"), "scope="+url.QueryEscape(groups[0].ID)) {
+		t.Fatalf("create child = %d location %q, want route-scoped inspectable redirect", child.Code, child.Header().Get("Location"))
+	}
+	childPage := webRequest(t, handler, http.MethodGet, child.Header().Get("Location"), nil)
+	childHTML := childPage.Body.String()
+	for _, want := range []string{"Alpha", "artifacts", "storage.local", "blob.bucket", "v1", "Parent scope"} {
+		if childPage.Code != http.StatusOK || !strings.Contains(childHTML, want) {
+			t.Fatalf("created child page missing %q: %d %q", want, childPage.Code, childHTML)
+		}
+	}
+	children, err := operator.ListResources(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: groups[0].ID}, 10)
+	if err != nil || len(children) != 1 || children[0].Spec.ParentID != groups[0].ID {
+		t.Fatalf("route-scoped children = %#v, %v, want child under route parent %q", children, err, groups[0].ID)
+	}
+	otherChildren, err := operator.ListResources(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: groups[1].ID}, 10)
+	if err != nil || len(otherChildren) != 0 {
+		t.Fatalf("form parent override created resources in wrong scope: %#v, %v", otherChildren, err)
+	}
+
+	for _, invalid := range []struct {
+		name   string
+		values url.Values
+	}{
+		{name: "type", values: url.Values{"type": {"not-supported"}, "name": {"named"}}},
+		{name: "name", values: url.Values{"type": {"group"}, "name": {"   "}}},
+	} {
+		response := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources", invalid.values)
+		body := response.Body.String()
+		if response.Code != http.StatusBadRequest || !strings.Contains(body, invalid.name) || strings.Contains(body, "invalid resource spec") {
+			t.Fatalf("invalid %s response = %d %q, want field-specific safe validation", invalid.name, response.Code, body)
+		}
 	}
 }
 

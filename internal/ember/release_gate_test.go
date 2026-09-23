@@ -111,8 +111,8 @@ func TestTenantResourceReleaseGatePreservesIsolationAcrossRestoreAndWeb(t *testi
 		t.Fatalf("POST /tenants = %d location %q, want gamma redirect", createdTenant.Code, createdTenant.Header().Get("Location"))
 	}
 	createdResource := webForm(t, handler, http.MethodPost, "/tenants/gamma/resources", url.Values{"type": {"group"}, "name": {"web-resource"}, "desiredState": {"ready"}})
-	if createdResource.Code != http.StatusSeeOther || createdResource.Header().Get("Location") != "/tenants/gamma" {
-		t.Fatalf("POST gamma resource = %d location %q, want tenant redirect", createdResource.Code, createdResource.Header().Get("Location"))
+	if createdResource.Code != http.StatusSeeOther || !strings.HasPrefix(createdResource.Header().Get("Location"), "/tenants/gamma/resources/") {
+		t.Fatalf("POST gamma resource = %d location %q, want inspectable resource redirect", createdResource.Code, createdResource.Header().Get("Location"))
 	}
 	gammaPage := webRequest(t, handler, http.MethodGet, "/tenants/gamma", nil)
 	if gammaPage.Code != http.StatusOK || !strings.Contains(gammaPage.Body.String(), "web-resource") || !strings.Contains(gammaPage.Body.String(), "isolated SQLite resource database") {

@@ -320,7 +320,7 @@
 
 {{define "resource-form"}}
 <form method="post" action="{{if eq .View "platform"}}{{baseURL .BasePath "/resources"}}{{else if eq .View "tenant"}}{{tenantURL .BasePath .Tenant.ID}}/resources{{else}}{{resourceURL .BasePath .TenantID .Resource.ID .ParentScope}}{{end}}" class="stack resource-create-form">
-  {{if eq .View "resource"}}<input type="hidden" name="parentID" value="{{.Resource.ID}}">{{end}}
+  {{if eq .View "platform"}}<p class="muted form-context">Parent context: <strong>Platform</strong></p>{{else if eq .View "tenant"}}<p class="muted form-context">Tenant context: <strong>{{.Tenant.DisplayName}}</strong> <code>{{.Tenant.ID}}</code></p>{{else}}<p class="muted form-context">Tenant context: <strong>{{.Tenant.DisplayName}}</strong> <code>{{.Tenant.ID}}</code> · parent resource <strong>{{.Resource.Spec.Name}}</strong> <code>{{.Resource.ID}}</code></p>{{end}}
   <fieldset class="choice-fieldset"><legend>Resource type</legend><div class="choice-grid three-up">
     <label class="choice-card"><input name="type" type="radio" value="group" checked><span><strong>Group</strong><small>Organize related resources</small></span></label>
     <label class="choice-card"><input name="type" type="radio" value="bucket"><span><strong>Bucket</strong><small>Store blobs and files</small></span></label>

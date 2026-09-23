@@ -733,9 +733,6 @@ func (handler *webHandler) createResource(writer http.ResponseWriter, request *h
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
-	if value := strings.TrimSpace(request.FormValue("parentID")); value != "" {
-		parentID = value
-	}
 	spec, err := webResourceSpec(request, parentID)
 	if err != nil {
 		handler.renderError(writer, request, http.StatusBadRequest, err)
@@ -747,32 +744,50 @@ func (handler *webHandler) createResource(writer http.ResponseWriter, request *h
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
-	if tenantID == "" {
-		handler.redirect(writer, request, webURL(webBasePath(request), "/"))
-		return
-	}
-	if parentID == "" {
-		if tenantID == "" {
-			handler.redirect(writer, request, webURL(webBasePath(request), "/"))
-		} else {
-			handler.redirect(writer, request, webTenantURL(webBasePath(request), tenantID))
-		}
-		return
-	}
 	handler.redirect(writer, request, webResourceURL(webBasePath(request), tenantID, resource.ID, resourceParentScope(parentID)))
 }
 
 func webResourceSpec(request *http.Request, parentID string) (models.ResourceSpec, error) {
 	resourceType := models.ResourceType(strings.TrimSpace(request.FormValue("type")))
-	if resourceType == "" {
-		return models.ResourceSpec{}, errInvalidWebForm
+	switch resourceType {
+	case models.ResourceTypeGroup, models.ResourceTypeBucket, models.ResourceTypeWorkload:
+		// Supported resource types are intentionally explicit at the web boundary.
+	case "":
+		return models.ResourceSpec{}, errors.New("resource type is required")
+	default:
+		return models.ResourceSpec{}, errors.New("resource type is unsupported")
+	}
+	name := strings.TrimSpace(request.FormValue("name"))
+	if name == "" {
+		return models.ResourceSpec{}, errors.New("name is required")
+	}
+	if len(name) > models.MaxResourceNameLength {
+		return models.ResourceSpec{}, errors.New("name exceeds the maximum length")
 	}
 	desiredState := models.ResourceState(strings.TrimSpace(request.FormValue("desiredState")))
+	switch desiredState {
+	case "", models.ResourceStateUnknown, models.ResourceStatePending, models.ResourceStateReady:
+		// The form exposes only safe desired-state choices.
+	default:
+		return models.ResourceSpec{}, errors.New("desired state is invalid")
+	}
+	providerNamespace := strings.TrimSpace(request.FormValue("providerNamespace"))
+	if len(providerNamespace) > models.MaxProviderNamespaceLength {
+		return models.ResourceSpec{}, errors.New("provider namespace exceeds the maximum length")
+	}
+	providerType := strings.TrimSpace(request.FormValue("providerType"))
+	if len(providerType) > models.MaxProviderTypeLength {
+		return models.ResourceSpec{}, errors.New("provider type exceeds the maximum length")
+	}
+	providerVersion := strings.TrimSpace(request.FormValue("providerVersion"))
+	if len(providerVersion) > models.MaxProviderVersionLength {
+		return models.ResourceSpec{}, errors.New("provider version exceeds the maximum length")
+	}
 	return models.ResourceSpec{
-		Type: resourceType, Name: request.FormValue("name"), ParentID: parentID,
+		Type: resourceType, Name: name, ParentID: parentID,
 		DesiredState: desiredState,
 		Provider: models.ProviderMetadata{
-			Namespace: request.FormValue("providerNamespace"), Type: request.FormValue("providerType"), Version: request.FormValue("providerVersion"),
+			Namespace: providerNamespace, Type: providerType, Version: providerVersion,
 		},
 	}, nil
 }
