@@ -366,6 +366,82 @@ func TestWebResourceHeaderPreservesHierarchyAndSupportedActions(t *testing.T) {
 	}
 }
 
+func TestWebResourceDetailsShareCommonShellAndProperties(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	if _, err := operator.CreateTenant(context.Background(), OperatorPrincipal{}, models.Tenant{ID: "alpha", DisplayName: "Alpha"}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	group, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha"}, models.ResourceSpec{
+		Type: models.ResourceTypeGroup, Name: "operations", Tags: map[string]string{"environment": "prod"},
+		Provider: models.ProviderMetadata{Namespace: "ember.local", Type: "control.group", Version: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(group) error = %v", err)
+	}
+	bucket, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: group.ID}, models.ResourceSpec{
+		Type: models.ResourceTypeBucket, Name: "artifacts", ParentID: group.ID,
+		Provider: models.ProviderMetadata{Namespace: "storage.local", Type: "blob.bucket", Version: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(bucket) error = %v", err)
+	}
+	workload, err := operator.CreateResource(context.Background(), OperatorPrincipal{TenantID: "alpha", ScopeID: group.ID}, models.ResourceSpec{
+		Type: models.ResourceTypeWorkload, Name: "worker", ParentID: group.ID,
+		Provider: models.ProviderMetadata{Namespace: "compute.local", Type: "compute.workload", Version: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(workload) error = %v", err)
+	}
+
+	paths := []struct {
+		path string
+		slot string
+	}{
+		{path: "/tenants/alpha/resources/" + group.ID, slot: `href="#children"`},
+		{path: "/tenants/alpha/resources/" + bucket.ID + "?scope=" + url.QueryEscape(group.ID), slot: `href="#objects"`},
+		{path: "/tenants/alpha/resources/" + workload.ID + "?scope=" + url.QueryEscape(group.ID), slot: `href="#children"`},
+	}
+	for _, resourcePath := range paths {
+		page := webRequest(t, handler, http.MethodGet, resourcePath.path, nil)
+		html := page.Body.String()
+		if page.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d %q, want resource detail", resourcePath.path, page.Code, html)
+		}
+		for _, want := range []string{
+			`class="resource-layout"`,
+			`class="resource-sidebar"`,
+			`class="resource-header"`,
+			`href="#configuration"`,
+			resourcePath.slot,
+			`href="#activity"`,
+			"Configuration",
+			"Provider namespace",
+			"Provider type",
+			"Provider version",
+			"Tags",
+			"Activity log",
+			"Open operations &amp; audit",
+		} {
+			if !strings.Contains(html, want) {
+				t.Fatalf("GET %s missing common detail marker %q: %q", resourcePath.path, want, html)
+			}
+		}
+	}
+
+	groupPage := webRequest(t, handler, http.MethodGet, paths[0].path, nil)
+	for _, want := range []string{"environment=prod", "artifacts", "worker", "Children"} {
+		if !strings.Contains(groupPage.Body.String(), want) {
+			t.Fatalf("group detail missing %q: %q", want, groupPage.Body.String())
+		}
+	}
+}
+
 func TestWebTenantDirectoryShowsIdentityStatusCountsAndSafeActions(t *testing.T) {
 	operator, err := NewFileOperator(t.TempDir(), 64<<20)
 	if err != nil {
