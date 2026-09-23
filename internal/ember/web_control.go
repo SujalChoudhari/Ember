@@ -221,6 +221,22 @@ func (handler *webHandler) controlRedirect(writer http.ResponseWriter, request *
 	handler.redirect(writer, request, webURL(webBasePath(request), "/control")+"?"+values.Encode())
 }
 
+func (handler *webHandler) controlConfirmation(writer http.ResponseWriter, request *http.Request, title, target, impact, submitLabel string) bool {
+	if webConfirmed(request) {
+		return false
+	}
+	handler.renderConfirmation(writer, request, webConfirmation{
+		Title:       title,
+		Target:      target,
+		Impact:      impact,
+		ActionURL:   webCurrentRequestURL(request),
+		CancelURL:   webControlURL(webBasePath(request), request.FormValue("tenant"), request.FormValue("scope"), request.FormValue("section")),
+		SubmitLabel: submitLabel,
+		Fields:      webConfirmationFields(request),
+	})
+	return true
+}
+
 func (handler *webHandler) controlCreateNetwork(writer http.ResponseWriter, request *http.Request) {
 	if err := request.ParseForm(); err != nil {
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
@@ -267,11 +283,18 @@ func (handler *webHandler) controlDeleteNetwork(writer http.ResponseWriter, requ
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
+	principal := handler.controlPrincipal(request)
 	if !webConfirmed(request) {
-		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
-		return
+		network, err := handler.operator.GetNetwork(request.Context(), principal, request.FormValue("networkID"))
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		if handler.controlConfirmation(writer, request, "Confirm network deletion", fmt.Sprintf("Network %q (%s)", network.Name, network.ID), "Remove the network and its allocated ports and endpoints.", "Delete network") {
+			return
+		}
 	}
-	if err := handler.operator.DeleteNetwork(request.Context(), handler.controlPrincipal(request), request.FormValue("networkID")); err != nil {
+	if err := handler.operator.DeleteNetwork(request.Context(), principal, request.FormValue("networkID")); err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
@@ -283,11 +306,18 @@ func (handler *webHandler) controlDeletePort(writer http.ResponseWriter, request
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
+	principal := handler.controlPrincipal(request)
 	if !webConfirmed(request) {
-		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
-		return
+		port, err := handler.operator.GetNetworkPort(request.Context(), principal, request.FormValue("portID"))
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		if handler.controlConfirmation(writer, request, "Confirm port deletion", fmt.Sprintf("Port %s/%d (%s)", port.Protocol, port.Number, port.ID), "Remove this port allocation. The network and workload remain.", "Delete port") {
+			return
+		}
 	}
-	if err := handler.operator.DeleteNetworkPort(request.Context(), handler.controlPrincipal(request), request.FormValue("portID")); err != nil {
+	if err := handler.operator.DeleteNetworkPort(request.Context(), principal, request.FormValue("portID")); err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
@@ -299,11 +329,18 @@ func (handler *webHandler) controlDeleteEndpoint(writer http.ResponseWriter, req
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
+	principal := handler.controlPrincipal(request)
 	if !webConfirmed(request) {
-		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
-		return
+		endpoint, err := handler.operator.GetNetworkEndpoint(request.Context(), principal, request.FormValue("endpointID"))
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		if handler.controlConfirmation(writer, request, "Confirm endpoint deletion", fmt.Sprintf("Endpoint %q at %s (%s)", endpoint.Name, endpoint.Address, endpoint.ID), "Remove this published endpoint. The network and port remain.", "Delete endpoint") {
+			return
+		}
 	}
-	if err := handler.operator.DeleteNetworkEndpoint(request.Context(), handler.controlPrincipal(request), request.FormValue("endpointID")); err != nil {
+	if err := handler.operator.DeleteNetworkEndpoint(request.Context(), principal, request.FormValue("endpointID")); err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
@@ -315,11 +352,29 @@ func (handler *webHandler) controlDeleteTopic(writer http.ResponseWriter, reques
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
+	principal := handler.controlPrincipal(request)
 	if !webConfirmed(request) {
-		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
-		return
+		topics, err := handler.operator.ListEventTopics(request.Context(), principal, events.MaxTopicCount)
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		var topic *events.Topic
+		for index := range topics {
+			if topics[index].ID == request.FormValue("topicID") {
+				topic = &topics[index]
+				break
+			}
+		}
+		if topic == nil {
+			handler.renderError(writer, request, http.StatusNotFound, errors.New("event topic not found"))
+			return
+		}
+		if handler.controlConfirmation(writer, request, "Confirm topic deletion", fmt.Sprintf("Topic %q (%s)", topic.Name, topic.ID), "Remove this topic and its local event topology. Published payloads are not exposed by this review.", "Delete topic") {
+			return
+		}
 	}
-	if err := handler.operator.DeleteEventTopic(request.Context(), handler.controlPrincipal(request), request.FormValue("topicID")); err != nil {
+	if err := handler.operator.DeleteEventTopic(request.Context(), principal, request.FormValue("topicID")); err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
@@ -331,11 +386,29 @@ func (handler *webHandler) controlDeleteSubscription(writer http.ResponseWriter,
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
+	principal := handler.controlPrincipal(request)
 	if !webConfirmed(request) {
-		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
-		return
+		subscriptions, err := handler.operator.ListEventSubscriptions(request.Context(), principal, events.MaxSubscriptionCount)
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		var subscription *events.Subscription
+		for index := range subscriptions {
+			if subscriptions[index].ID == request.FormValue("subscriptionID") {
+				subscription = &subscriptions[index]
+				break
+			}
+		}
+		if subscription == nil {
+			handler.renderError(writer, request, http.StatusNotFound, errors.New("event subscription not found"))
+			return
+		}
+		if handler.controlConfirmation(writer, request, "Confirm subscription deletion", fmt.Sprintf("Subscription %q (%s)", subscription.Name, subscription.ID), "Remove this subscription and its local event delivery binding. Published payloads are not exposed by this review.", "Delete subscription") {
+			return
+		}
 	}
-	if err := handler.operator.DeleteEventSubscription(request.Context(), handler.controlPrincipal(request), request.FormValue("subscriptionID")); err != nil {
+	if err := handler.operator.DeleteEventSubscription(request.Context(), principal, request.FormValue("subscriptionID")); err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
@@ -417,11 +490,18 @@ func (handler *webHandler) controlCleanupVolumes(writer http.ResponseWriter, req
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
+	principal := handler.controlPrincipal(request)
 	if !webConfirmed(request) {
-		handler.renderError(writer, request, http.StatusConflict, ErrDestructiveConfirmationRequired)
-		return
+		workload, err := handler.operator.GetWorkload(request.Context(), principal, request.FormValue("resourceID"))
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		if handler.controlConfirmation(writer, request, "Confirm workload volume cleanup", fmt.Sprintf("Workload %q (%s)", workload.Resource.Spec.Name, workload.Resource.ID), "Remove the workload's attached volume state. The workload resource remains.", "Clean up volumes") {
+			return
+		}
 	}
-	if err := handler.operator.CleanupWorkloadVolumes(request.Context(), handler.controlPrincipal(request), request.FormValue("resourceID")); err != nil {
+	if err := handler.operator.CleanupWorkloadVolumes(request.Context(), principal, request.FormValue("resourceID")); err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
@@ -469,7 +549,30 @@ func (handler *webHandler) controlRecover(writer http.ResponseWriter, request *h
 		return
 	}
 	action := models.RecoveryAction(request.FormValue("action"))
-	_, err := handler.operator.Recover(request.Context(), handler.controlPrincipal(request), deployment.RecoveryRequest{RequestID: fmt.Sprintf("web-recovery-%d", time.Now().UnixNano()), ApplyProgressID: request.FormValue("applyProgressID"), Action: action})
+	principal := handler.controlPrincipal(request)
+	if action == models.RecoveryActionRollback && !webConfirmed(request) {
+		progress, err := handler.operator.ListApplyProgress(request.Context(), principal, persistence.MaxApplyProgressListLimit)
+		if err != nil {
+			handler.renderError(writer, request, webStatus(err), err)
+			return
+		}
+		progressID := request.FormValue("applyProgressID")
+		found := false
+		for _, record := range progress {
+			if record.ID == progressID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			handler.renderError(writer, request, http.StatusNotFound, errors.New("apply progress record not found"))
+			return
+		}
+		if handler.controlConfirmation(writer, request, "Confirm deployment rollback", fmt.Sprintf("Apply progress %s", progressID), "Roll back the recorded local deployment changes. No new deployment is applied.", "Roll back deployment") {
+			return
+		}
+	}
+	_, err := handler.operator.Recover(request.Context(), principal, deployment.RecoveryRequest{RequestID: fmt.Sprintf("web-recovery-%d", time.Now().UnixNano()), ApplyProgressID: request.FormValue("applyProgressID"), Action: action})
 	if err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
