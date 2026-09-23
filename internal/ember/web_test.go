@@ -789,6 +789,84 @@ func TestWebResourceCreationUsesContextAndNavigatesToInspectableResource(t *test
 	}
 }
 
+func TestWebResourceLocksExplainScopeTokenAndMutationBoundaries(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+	ctx := context.Background()
+
+	if _, err := operator.CreateTenant(ctx, OperatorPrincipal{}, models.Tenant{ID: "alpha", DisplayName: "Alpha"}); err != nil {
+		t.Fatalf("CreateTenant() error = %v", err)
+	}
+	root, err := operator.CreateResource(ctx, OperatorPrincipal{TenantID: "alpha"}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "operations"})
+	if err != nil {
+		t.Fatalf("CreateResource(root) error = %v", err)
+	}
+	child, err := operator.CreateResource(ctx, OperatorPrincipal{TenantID: "alpha", ScopeID: root.ID}, models.ResourceSpec{Type: models.ResourceTypeBucket, Name: "artifacts", ParentID: root.ID})
+	if err != nil {
+		t.Fatalf("CreateResource(child) error = %v", err)
+	}
+	other, err := operator.CreateResource(ctx, OperatorPrincipal{TenantID: "alpha"}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "other"})
+	if err != nil {
+		t.Fatalf("CreateResource(other) error = %v", err)
+	}
+
+	rootPath := "/tenants/alpha/resources/" + root.ID
+	childPath := "/tenants/alpha/resources/" + child.ID + "?scope=" + url.QueryEscape(root.ID)
+	lockToken := "portal-lock-token"
+	acquired := webForm(t, handler, http.MethodPost, rootPath+"/lock/acquire", url.Values{
+		"scope": {root.ID}, "owner": {"portal-owner"}, "token": {lockToken},
+	})
+	if acquired.Code != http.StatusSeeOther || strings.Contains(acquired.Header().Get("Location"), lockToken) {
+		t.Fatalf("acquire lock = %d location %q, want redirect without token", acquired.Code, acquired.Header().Get("Location"))
+	}
+
+	rootPage := webRequest(t, handler, http.MethodGet, acquired.Header().Get("Location"), nil)
+	rootHTML := rootPage.Body.String()
+	for _, want := range []string{"portal-owner", "The token is never displayed", "refuses state changes", "resource and its descendants"} {
+		if rootPage.Code != http.StatusOK || !strings.Contains(rootHTML, want) {
+			t.Fatalf("locked resource page missing %q: %d %q", want, rootPage.Code, rootHTML)
+		}
+	}
+	if strings.Contains(rootHTML, lockToken) {
+		t.Fatalf("locked resource page rendered token: %q", rootHTML)
+	}
+
+	childPage := webRequest(t, handler, http.MethodGet, childPath, nil)
+	if childPage.Code != http.StatusOK || !strings.Contains(childPage.Body.String(), "descendants") {
+		t.Fatalf("child resource page = %d %q, want lock impact explanation", childPage.Code, childPage.Body.String())
+	}
+	blocked := webForm(t, handler, http.MethodPost, "/tenants/alpha/resources/"+child.ID+"/tags?scope="+url.QueryEscape(root.ID), url.Values{"tags": {"tier=blocked"}})
+	if blocked.Code != http.StatusConflict || !strings.Contains(blocked.Body.String(), "resource is read-only") || strings.Contains(blocked.Body.String(), lockToken) {
+		t.Fatalf("locked mutation = %d %q, want redacted conflict refusal", blocked.Code, blocked.Body.String())
+	}
+
+	crossScope := webRequest(t, handler, http.MethodGet, rootPath+"?scope="+url.QueryEscape(other.ID), nil)
+	if crossScope.Code != http.StatusForbidden || !strings.Contains(crossScope.Body.String(), "operator scope denied") || strings.Contains(crossScope.Body.String(), lockToken) {
+		t.Fatalf("cross-scope lock inspection = %d %q, want denied redacted response", crossScope.Code, crossScope.Body.String())
+	}
+
+	wrongRelease := webForm(t, handler, http.MethodPost, rootPath+"/lock/release", url.Values{
+		"scope": {root.ID}, "owner": {"portal-owner"}, "token": {"wrong-token"},
+	})
+	if wrongRelease.Code != http.StatusConflict || strings.Contains(wrongRelease.Body.String(), lockToken) {
+		t.Fatalf("wrong release = %d %q, want conflict without token", wrongRelease.Code, wrongRelease.Body.String())
+	}
+	released := webForm(t, handler, http.MethodPost, rootPath+"/lock/release", url.Values{
+		"scope": {root.ID}, "owner": {"portal-owner"}, "token": {lockToken},
+	})
+	if released.Code != http.StatusSeeOther || strings.Contains(released.Header().Get("Location"), lockToken) {
+		t.Fatalf("release lock = %d location %q, want redirect without token", released.Code, released.Header().Get("Location"))
+	}
+	unlocked := webRequest(t, handler, http.MethodGet, released.Header().Get("Location"), nil)
+	if unlocked.Code != http.StatusOK || !strings.Contains(unlocked.Body.String(), "unlocked") || strings.Contains(unlocked.Body.String(), lockToken) {
+		t.Fatalf("unlocked resource page = %d %q, want unlocked redacted state", unlocked.Code, unlocked.Body.String())
+	}
+}
+
 func webRequest(t *testing.T, handler http.Handler, method, path string, body *strings.Reader) *httptest.ResponseRecorder {
 	t.Helper()
 	if body == nil {
