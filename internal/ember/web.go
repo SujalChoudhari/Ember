@@ -62,6 +62,7 @@ type webPage struct {
 	Audit            []models.AuditEntry
 	Objects          []models.BlobObject
 	ObjectBytes      int64
+	Workload         *webWorkload
 	Workloads        []webWorkload
 	Networks         []models.Network
 	Ports            []models.NetworkPort
@@ -756,6 +757,14 @@ func (handler *webHandler) resourcePage(writer http.ResponseWriter, request *htt
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
+	var workload *webWorkload
+	if resource.Spec.Type == models.ResourceTypeWorkload {
+		report, inspectErr := handler.operator.InspectWorkload(request.Context(), principal, resourceID, 10)
+		if inspectErr == nil {
+			volumes, _ := handler.operator.ListWorkloadVolumes(request.Context(), principal, resourceID, MaxWorkloadVolumeRecords)
+			workload = &webWorkload{View: &WorkloadView{Resource: *resource, Status: report.Status}, Logs: report.Logs, Volumes: volumes}
+		}
+	}
 	var tenants []models.Tenant
 	if tenantID != "" {
 		tenants, err = handler.operator.ListTenants(request.Context(), OperatorPrincipal{})
@@ -776,7 +785,8 @@ func (handler *webHandler) resourcePage(writer http.ResponseWriter, request *htt
 		View: "resource", Title: resource.Spec.Name, Tenant: tenant, Tenants: tenants,
 		TenantID: tenantID, Resource: resource, Children: children, ParentScope: resource.Spec.ParentID, Lock: lock,
 		Operations: operations, Audit: audit, Objects: objects, ObjectBytes: objectBytes,
-		Notice: webNotice(request),
+		Workload: workload,
+		Notice:   webNotice(request),
 	})
 }
 

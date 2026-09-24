@@ -17,6 +17,41 @@ import (
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 )
 
+func TestWebWorkloadResourcePageShowsRuntimeFactsAndScope(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	group, err := operator.CreateResource(context.Background(), OperatorPrincipal{}, models.ResourceSpec{
+		Type: models.ResourceTypeGroup, Name: "compute", DesiredState: models.ResourceStateReady,
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(group) error = %v", err)
+	}
+	workloadView, err := operator.CreateWorkload(context.Background(), OperatorPrincipal{ScopeID: group.ID}, models.ResourceSpec{
+		Type: models.ResourceTypeWorkload, Name: "api", ParentID: group.ID,
+		DesiredState: models.ResourceStateReady,
+		Provider:     models.ProviderMetadata{Namespace: "Ember.Compute", Type: "workloads", Version: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+
+	response := webRequest(t, handler, http.MethodGet, "/resources/"+workloadView.Resource.ID+"?scope="+url.QueryEscape(group.ID), nil)
+	html := response.Body.String()
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET workload resource = %d %q", response.Code, html)
+	}
+	for _, want := range []string{"Workload runtime", "Health", "Readiness", "Execution identity", "Ember.Compute", "api"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("workload resource page missing %q: %q", want, html)
+		}
+	}
+}
+
 func TestWebOperationsAreFilterableAndInspectableWithoutPayloadDetails(t *testing.T) {
 	operator, err := NewFileOperator(t.TempDir(), 64<<20)
 	if err != nil {
