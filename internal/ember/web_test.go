@@ -52,6 +52,55 @@ func TestWebWorkloadResourcePageShowsRuntimeFactsAndScope(t *testing.T) {
 	}
 }
 
+func TestWebWorkloadRestartShowsExecutionAndFailureAction(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+	ctx := context.Background()
+
+	group, err := operator.CreateResource(ctx, OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "Operations"})
+	if err != nil {
+		t.Fatalf("CreateResource(group) error = %v", err)
+	}
+	workloadView, err := operator.CreateWorkload(ctx, OperatorPrincipal{ScopeID: group.ID}, models.ResourceSpec{
+		Type: models.ResourceTypeWorkload, Name: "Worker", ParentID: group.ID,
+		Provider: models.ProviderMetadata{Namespace: "Ember.Compute", Type: "workloads", Version: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("CreateWorkload() error = %v", err)
+	}
+	workload := workloadView.Resource
+	values := url.Values{"scope": {group.ID}, "section": {"workloads"}, "resourceID": {workload.ID}}
+	restarted := webForm(t, handler, http.MethodPost, "/control/workload-restart", values)
+	if restarted.Code != http.StatusSeeOther {
+		t.Fatalf("restart = %d %q, want redirect", restarted.Code, restarted.Body.String())
+	}
+	location := restarted.Header().Get("Location")
+	if !strings.Contains(location, "status=control") {
+		t.Fatalf("restart location = %q, want success status", location)
+	}
+	page := webRequest(t, handler, http.MethodGet, location, nil)
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Workload restarted; execution") {
+		t.Fatalf("restart notice = %d %q, want execution identity", page.Code, page.Body.String())
+	}
+
+	unsupported, err := operator.CreateResource(ctx, OperatorPrincipal{ScopeID: group.ID}, models.ResourceSpec{
+		Type: models.ResourceTypeWorkload, Name: "Unsupported", ParentID: group.ID,
+		Provider: models.ProviderMetadata{Namespace: "missing", Type: "provider", Version: "v1"},
+	})
+	if err != nil {
+		t.Fatalf("CreateResource(unsupported workload) error = %v", err)
+	}
+	values.Set("resourceID", unsupported.ID)
+	failed := webForm(t, handler, http.MethodPost, "/control/workload-restart", values)
+	if failed.Code != http.StatusNotFound || !strings.Contains(failed.Body.String(), "Inspect workload details") || !strings.Contains(failed.Body.String(), webResourceURL("", "", unsupported.ID, group.ID)) {
+		t.Fatalf("failed restart = %d %q, want safe actionable resource path", failed.Code, failed.Body.String())
+	}
+}
+
 func TestWebOperationsAreFilterableAndInspectableWithoutPayloadDetails(t *testing.T) {
 	operator, err := NewFileOperator(t.TempDir(), 64<<20)
 	if err != nil {

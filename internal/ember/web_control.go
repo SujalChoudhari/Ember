@@ -515,11 +515,18 @@ func (handler *webHandler) controlRestartWorkload(writer http.ResponseWriter, re
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
-	if _, err := handler.operator.RestartWorkload(request.Context(), handler.controlPrincipal(request), request.FormValue("resourceID")); err != nil {
-		handler.renderError(writer, request, webStatus(err), err)
+	resourceID := request.FormValue("resourceID")
+	principal := handler.controlPrincipal(request)
+	view, err := handler.operator.RestartWorkload(request.Context(), principal, resourceID)
+	if err != nil {
+		handler.render(writer, request, webStatus(err), webPage{
+			Title: "Request error", Error: err.Error(),
+			ErrorActionURL:   webResourceURL(webBasePath(request), principal.TenantID, resourceID, principal.ScopeID),
+			ErrorActionLabel: "Inspect workload details",
+		})
 		return
 	}
-	handler.controlRedirect(writer, request, "control", "Workload restarted.")
+	handler.controlRedirect(writer, request, "control", fmt.Sprintf("Workload restarted; execution %q is now active.", view.Status.ExecutionID))
 }
 
 func (handler *webHandler) controlAttachVolume(writer http.ResponseWriter, request *http.Request) {
