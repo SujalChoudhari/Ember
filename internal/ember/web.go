@@ -56,6 +56,8 @@ type webPage struct {
 	ParentScope      string
 	Lock             *models.ResourceLock
 	Operations       []models.Operation
+	Operation        *models.Operation
+	OperationAudit   []models.AuditEntry
 	Audit            []models.AuditEntry
 	Objects          []models.BlobObject
 	ObjectBytes      int64
@@ -74,6 +76,7 @@ type webPage struct {
 	PlatformOverview webPlatformOverview
 	Notice           string
 	Error            string
+	Query            url.Values
 	Confirmation     *webConfirmation
 }
 

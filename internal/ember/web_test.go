@@ -13,6 +13,45 @@ import (
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 )
 
+func TestWebOperationsAreFilterableAndInspectableWithoutPayloadDetails(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	resource, err := operator.CreateResource(context.Background(), OperatorPrincipal{}, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "operations"})
+	if err != nil {
+		t.Fatalf("CreateResource() error = %v", err)
+	}
+	mutation, err := operator.UpdateResourceTags(context.Background(), OperatorPrincipal{}, resource.ID, map[string]string{"secret": "must-not-render"}, "request-filter", "correlation-filter")
+	if err != nil || mutation == nil || mutation.Operation == nil {
+		t.Fatalf("UpdateResourceTags() = %#v, %v, want operation", mutation, err)
+	}
+
+	filtered := webRequest(t, handler, http.MethodGet, "/control?section=operations&status=succeeded&q="+url.QueryEscape(mutation.Operation.ID), nil)
+	filteredHTML := filtered.Body.String()
+	if filtered.Code != http.StatusOK || !strings.Contains(filteredHTML, mutation.Operation.ID) || !strings.Contains(filteredHTML, "correlation-filter") {
+		t.Fatalf("filtered operations page = %d %q, want matching traceability", filtered.Code, filteredHTML)
+	}
+	if strings.Contains(filteredHTML, "must-not-render") {
+		t.Fatalf("filtered operations page = %q, want payload details redacted", filteredHTML)
+	}
+	if !strings.Contains(filteredHTML, "/control/operations/"+url.PathEscape(mutation.Operation.ID)) {
+		t.Fatalf("filtered operations page = %q, want operation detail link", filteredHTML)
+	}
+
+	detail := webRequest(t, handler, http.MethodGet, "/control/operations/"+url.PathEscape(mutation.Operation.ID), nil)
+	detailHTML := detail.Body.String()
+	if detail.Code != http.StatusOK || !strings.Contains(detailHTML, "Operation detail") || !strings.Contains(detailHTML, "request-filter") || !strings.Contains(detailHTML, "correlation-filter") || !strings.Contains(detailHTML, "resource.update.tags") {
+		t.Fatalf("operation detail = %d %q, want linked operation and audit evidence", detail.Code, detailHTML)
+	}
+	if strings.Contains(detailHTML, "must-not-render") {
+		t.Fatalf("operation detail = %q, want payload details redacted", detailHTML)
+	}
+}
+
 func TestWebManagementFlowKeepsPlatformAndTenantResourcesSeparate(t *testing.T) {
 	operator, err := NewFileOperator(t.TempDir(), 64<<20)
 	if err != nil {

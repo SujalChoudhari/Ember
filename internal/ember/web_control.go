@@ -39,6 +39,10 @@ func (handler *webHandler) control(writer http.ResponseWriter, request *http.Req
 		handler.controlPage(writer, request)
 		return
 	}
+	if len(segments) == 3 && request.Method == http.MethodGet && segments[1] == "operations" {
+		handler.controlOperation(writer, request, segments[2])
+		return
+	}
 	if request.Method != http.MethodPost || len(segments) != 2 {
 		handler.methodNotAllowed(writer, request, http.MethodGet+", "+http.MethodPost)
 		return
@@ -85,6 +89,30 @@ func (handler *webHandler) control(writer http.ResponseWriter, request *http.Req
 	default:
 		handler.renderError(writer, request, http.StatusNotFound, errors.New("control action not found"))
 	}
+}
+
+func (handler *webHandler) controlOperation(writer http.ResponseWriter, request *http.Request, operationID string) {
+	principal := OperatorPrincipal{TenantID: strings.TrimSpace(request.URL.Query().Get("tenant")), ScopeID: strings.TrimSpace(request.URL.Query().Get("scope"))}
+	operation, err := handler.operator.GetOperation(request.Context(), principal, operationID)
+	if err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
+	audit, err := handler.operator.ListAuditHistory(request.Context(), principal, operation.ResourceID, persistence.MaxAuditListLimit)
+	if err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
+	filteredAudit := make([]models.AuditEntry, 0, len(audit))
+	for _, entry := range audit {
+		if entry.OperationID == operation.ID {
+			filteredAudit = append(filteredAudit, entry)
+		}
+	}
+	handler.render(writer, request, http.StatusOK, webPage{
+		View: "operation", Title: "Operation detail", TenantID: principal.TenantID,
+		SelectedScope: principal.ScopeID, Operation: operation, OperationAudit: filteredAudit,
+	})
 }
 
 func (handler *webHandler) controlPage(writer http.ResponseWriter, request *http.Request) {
@@ -179,6 +207,31 @@ func (handler *webHandler) controlPage(writer http.ResponseWriter, request *http
 			audit = append(audit, entries...)
 		}
 	}
+	operationStatus := strings.TrimSpace(request.URL.Query().Get("status"))
+	operationQuery := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("q")))
+	filteredOperations := make([]models.Operation, 0, len(operations))
+	for _, operation := range operations {
+		searchText := strings.ToLower(strings.Join([]string{operation.ID, operation.ResourceID, operation.CorrelationID, operation.RequestID, string(operation.Status), operation.Outcome}, " "))
+		if operationStatus != "" && string(operation.Status) != operationStatus {
+			continue
+		}
+		if operationQuery != "" && !strings.Contains(searchText, operationQuery) {
+			continue
+		}
+		filteredOperations = append(filteredOperations, operation)
+	}
+	operations = filteredOperations
+	auditQuery := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("audit")))
+	if auditQuery != "" {
+		filteredAudit := make([]models.AuditEntry, 0, len(audit))
+		for _, entry := range audit {
+			searchText := strings.ToLower(strings.Join([]string{entry.ID, entry.OperationID, entry.ResourceID, entry.CorrelationID, entry.RequestID, entry.Action, entry.Outcome}, " "))
+			if strings.Contains(searchText, auditQuery) {
+				filteredAudit = append(filteredAudit, entry)
+			}
+		}
+		audit = filteredAudit
+	}
 	progress, progressErr := handler.operator.ListApplyProgress(ctx, principal, persistence.MaxApplyProgressListLimit)
 	if progressErr != nil && !errors.Is(progressErr, ErrOperatorDeploymentUnavailable) {
 		handler.renderError(writer, request, webStatus(progressErr), progressErr)
@@ -205,6 +258,7 @@ func (handler *webHandler) controlPage(writer http.ResponseWriter, request *http
 	handler.render(writer, request, http.StatusOK, webPage{
 		View: "control", Section: request.URL.Query().Get("section"), Title: "Control center",
 		Tenant: tenant, Tenants: tenants, TenantID: tenantID, SelectedScope: selectedScope,
+		Query:     request.URL.Query(),
 		Resources: resources, Workloads: workloads, Networks: networks, Ports: ports, Endpoints: endpoints,
 		Operations: operations, Audit: audit, ApplyProgress: progress, Recoveries: recoveries,
 		Topics: topics, Subscriptions: subscriptions, DeadLetters: deadLetters,
