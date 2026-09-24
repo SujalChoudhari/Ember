@@ -78,6 +78,8 @@ type webPage struct {
 	PlatformOverview webPlatformOverview
 	Notice           string
 	Error            string
+	ErrorActionURL   string
+	ErrorActionLabel string
 	Query            url.Values
 	Confirmation     *webConfirmation
 }

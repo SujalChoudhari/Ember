@@ -33,7 +33,7 @@
     </div>
   </header>
   <main class="shell">
-    {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
+    {{if .Error}}<div class="notice error" role="alert">{{.Error}}{{if .ErrorActionURL}} <a href="{{.ErrorActionURL}}">{{.ErrorActionLabel}}</a>{{end}}</div>{{end}}
     {{if .Notice}}<div class="notice success" role="status">{{.Notice}}</div>{{end}}
     {{if eq .View "confirmation"}}
       <section class="confirmation-page">
