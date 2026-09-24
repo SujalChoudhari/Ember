@@ -15,6 +15,8 @@ var ErrInvalidEvent = errors.New("invalid event")
 type Event struct {
 	ID            string
 	CorrelationID string
+	TenantID      string
+	ScopeID       string
 	Type          string
 	Payload       []byte
 }
@@ -26,6 +28,8 @@ func (event Event) Validate() error {
 	delivery := queue.Delivery{
 		ID:            event.ID,
 		CorrelationID: event.CorrelationID,
+		TenantID:      event.TenantID,
+		ScopeID:       event.ScopeID,
 		Payload:       event.Payload,
 	}
 	if err := delivery.Validate(); err != nil {
@@ -50,6 +54,8 @@ func Deliver(ctx context.Context, event Event, policy queue.RetryPolicy, consume
 	delivery := queue.Delivery{
 		ID:            event.ID,
 		CorrelationID: event.CorrelationID,
+		TenantID:      event.TenantID,
+		ScopeID:       event.ScopeID,
 		Payload:       event.Payload,
 	}
 	return queue.DeliverWithDeadLetter(

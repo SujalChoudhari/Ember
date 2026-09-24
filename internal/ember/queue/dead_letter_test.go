@@ -146,3 +146,26 @@ func TestFileDeadLetterStoreRejectsConfiguredSnapshotOverflow(t *testing.T) {
 		t.Fatalf("Record() error = %v, want ErrDeadLetterStoreTooLarge", err)
 	}
 }
+
+func TestFileDeadLetterStoreListsOnlyOwnedRecords(t *testing.T) {
+	store, err := NewFileDeadLetterStore(filepath.Join(t.TempDir(), "dead-letters.json"), DeadLetterStoreOptions{MaxRecords: 3})
+	if err != nil {
+		t.Fatalf("NewFileDeadLetterStore() error = %v", err)
+	}
+	for _, owned := range []struct{ tenant, scope, id string }{
+		{"tenant-a", "scope-a", "message-a"},
+		{"tenant-b", "scope-b", "message-b"},
+	} {
+		delivery := Delivery{ID: owned.id, CorrelationID: "correlation-" + owned.id, TenantID: owned.tenant, ScopeID: owned.scope, Payload: []byte("payload")}
+		if err := store.Record(context.Background(), delivery, DeliveryOutcome{DeliveryID: delivery.ID, CorrelationID: delivery.CorrelationID, Attempts: 1, Status: DeliveryStatusFailed, Reason: DeliveryFailureReason}); err != nil {
+			t.Fatalf("Record(%s) error = %v", owned.id, err)
+		}
+	}
+	records, err := store.ListOwned(context.Background(), "tenant-a", "scope-a", 3)
+	if err != nil {
+		t.Fatalf("ListOwned() error = %v", err)
+	}
+	if len(records) != 1 || records[0].DeliveryID != "message-a" {
+		t.Fatalf("ListOwned() = %#v, want only tenant-a/scope-a record", records)
+	}
+}

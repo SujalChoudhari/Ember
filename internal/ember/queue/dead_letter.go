@@ -40,6 +40,8 @@ var (
 // Payload bytes are represented only by size and digest so inspection and
 // persisted state cannot expose the delivery payload or consumer error text.
 type DeadLetterRecord struct {
+	TenantID      string    `json:"tenant_id,omitempty"`
+	ScopeID       string    `json:"scope_id,omitempty"`
 	DeliveryID    string    `json:"delivery_id"`
 	CorrelationID string    `json:"correlation_id"`
 	Attempts      int       `json:"attempts"`
@@ -240,6 +242,8 @@ func (store *FileDeadLetterStore) saveLocked() error {
 func deadLetterRecord(delivery Delivery, outcome DeliveryOutcome) DeadLetterRecord {
 	digest := sha256.Sum256(delivery.Payload)
 	return DeadLetterRecord{
+		TenantID:      delivery.TenantID,
+		ScopeID:       delivery.ScopeID,
 		DeliveryID:    delivery.ID,
 		CorrelationID: delivery.CorrelationID,
 		Attempts:      outcome.Attempts,
@@ -303,6 +307,29 @@ func (store *FileDeadLetterStore) List(ctx context.Context, limit int) ([]DeadLe
 		return append([]DeadLetterRecord(nil), store.records[:limit]...), nil
 	}
 	return append([]DeadLetterRecord(nil), store.records...), nil
+}
+
+// ListOwned returns only records with an exact persisted tenant and scope
+// owner. Legacy records without ownership are deliberately omitted.
+func (store *FileDeadLetterStore) ListOwned(ctx context.Context, tenantID, scopeID string, limit int) ([]DeadLetterRecord, error) {
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(scopeID) == "" {
+		return []DeadLetterRecord{}, nil
+	}
+	if limit <= 0 || limit > MaxDeadLetterListLimit || limit > store.options.MaxRecords {
+		return nil, ErrDeadLetterListLimit
+	}
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	owned := make([]DeadLetterRecord, 0, limit)
+	for _, record := range store.records {
+		if record.TenantID == tenantID && record.ScopeID == scopeID {
+			owned = append(owned, record)
+			if len(owned) == limit {
+				break
+			}
+		}
+	}
+	return owned, nil
 }
 
 // DeliverWithDeadLetter records an exhausted delivery after Deliver returns its
