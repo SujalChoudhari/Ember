@@ -77,6 +77,46 @@ func TestSQLiteResourceStorePersistsPlatformResourceLifecycle(t *testing.T) {
 	}
 }
 
+func TestSQLiteResourceStorePersistsAndCoordinatesResourceLocks(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "platform.db")
+	first, err := NewSQLiteResourceStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteResourceStore(first) error = %v", err)
+	}
+	resource, err := first.Create(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "platform"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	lock := models.ResourceLock{Owner: "controller-a", Token: "token-a"}
+	conflict := models.ResourceLock{Owner: "controller-b", Token: "token-b"}
+	if err := first.AcquireLock(ctx, "", resource.ID, lock); err != nil {
+		t.Fatalf("AcquireLock(first) error = %v", err)
+	}
+
+	second, err := NewSQLiteResourceStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteResourceStore(second) error = %v", err)
+	}
+	defer second.Close()
+	inspected, err := second.InspectLock(ctx, "", resource.ID)
+	if err != nil || inspected == nil || *inspected != lock {
+		t.Fatalf("InspectLock(second) = %#v, %v; want %#v", inspected, err, lock)
+	}
+	if err := second.AcquireLock(ctx, "", resource.ID, conflict); !errors.Is(err, ErrResourceLockConflict) {
+		t.Fatalf("AcquireLock(second) error = %v, want ErrResourceLockConflict", err)
+	}
+	if err := second.ReleaseLock(ctx, "", resource.ID, conflict); !errors.Is(err, ErrResourceLockNotOwner) {
+		t.Fatalf("ReleaseLock(second, non-owner) error = %v, want ErrResourceLockNotOwner", err)
+	}
+	if err := second.ReleaseLock(ctx, "", resource.ID, lock); err != nil {
+		t.Fatalf("ReleaseLock(second) error = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+}
+
 func TestSQLiteResourceStoreRejectsUnsupportedSchema(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "platform.db")
