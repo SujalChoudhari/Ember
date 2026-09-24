@@ -104,6 +104,8 @@ func (operator *Operator) PublishEvent(ctx context.Context, principal OperatorPr
 	if retries < 0 || retries > queue.MaxRetryCount {
 		return nil, queue.ErrInvalidRetryPolicy
 	}
+	event.TenantID = principal.TenantID
+	event.ScopeID = scopeID
 	return operator.eventBroker.DeliverWithMetrics(ctx, scopeID, owner, topicID, event, queue.RetryPolicy{MaxRetries: retries}, func(context.Context, events.Subscription, events.Event) error {
 		return nil
 	}, nil, operator.eventDeadLetters, operator.eventMetrics)
@@ -113,7 +115,13 @@ func (operator *Operator) ListEventDeadLetters(ctx context.Context, principal Op
 	if _, err := operator.eventScope(principal); err != nil {
 		return nil, err
 	}
-	return operator.eventDeadLetters.List(ctx, limit)
+	owned, ok := operator.eventDeadLetters.(interface {
+		ListOwned(context.Context, string, string, int) ([]queue.DeadLetterRecord, error)
+	})
+	if !ok {
+		return nil, ErrOperatorEventsUnavailable
+	}
+	return owned.ListOwned(ctx, principal.TenantID, principal.ScopeID, limit)
 }
 
 func (operator *Operator) EventMetrics() (events.MetricsSnapshot, error) {

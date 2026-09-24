@@ -45,6 +45,8 @@ func (policy RetryPolicy) Validate() error {
 type Delivery struct {
 	ID            string
 	CorrelationID string
+	TenantID      string
+	ScopeID       string
 	Payload       []byte
 }
 
