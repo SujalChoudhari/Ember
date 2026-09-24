@@ -1,8 +1,8 @@
 # Ember deployment, recovery, and release guide
 
-Deployment documents are JSON plans resolved against the current local
-operator. The path is inspectable and bounded; it is not a hosted deployment
-service.
+Use deployment documents when you want to compare desired state with the local
+operator and then apply an approved plan. The path is inspectable and bounded;
+it is not a hosted deployment service.
 
 ## Plan and apply
 

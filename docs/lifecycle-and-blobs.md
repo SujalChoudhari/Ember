@@ -1,7 +1,9 @@
 # Ember lifecycle and Blob guide
 
-Ember models a bounded resource hierarchy and keeps Blob content behind a
-bucket resource. The supported lifecycle is local, explicit, and scope-checked.
+This guide explains how an operator moves a resource through its lifecycle and
+what Ember protects at each step. Ember keeps Blob content behind a bucket
+resource; the lifecycle is local, explicit, and scope-checked rather than a
+cloud-provider provisioning workflow.
 
 ## Resource lifecycle
 
