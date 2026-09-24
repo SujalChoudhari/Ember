@@ -3,10 +3,14 @@ package ember
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -125,7 +129,8 @@ func TestWebManagementFlowKeepsPlatformAndTenantResourcesSeparate(t *testing.T) 
 }
 
 func TestWebBucketStoreUploadsListsAndDownloadsObjects(t *testing.T) {
-	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	root := t.TempDir()
+	operator, err := NewFileOperator(root, 64<<20)
 	if err != nil {
 		t.Fatalf("NewFileOperator() error = %v", err)
 	}
@@ -191,6 +196,47 @@ func TestWebBucketStoreUploadsListsAndDownloadsObjects(t *testing.T) {
 	download := webRequest(t, handler, http.MethodGet, "/resources/"+url.PathEscape(buckets[0].ID)+"?scope="+url.QueryEscape(groups[0].ID)+"&object=hello.txt", nil)
 	if download.Code != http.StatusOK || download.Body.String() != "hello from Ember" {
 		t.Fatalf("download = %d %q, want uploaded object", download.Code, download.Body.String())
+	}
+	verified := webForm(t, handler, http.MethodPost, "/resources/"+url.PathEscape(buckets[0].ID)+"/objects/verify?scope="+url.QueryEscape(groups[0].ID), url.Values{
+		"objectKey": {"hello.txt"},
+	})
+	if verified.Code != http.StatusSeeOther || !strings.Contains(verified.Header().Get("Location"), "status=verified") {
+		t.Fatalf("verify object = %d location %q, want verified redirect", verified.Code, verified.Header().Get("Location"))
+	}
+	if err := os.WriteFile(filepath.Join(root, "blobs", "objects", buckets[0].ID, "hello.txt"), []byte("tampered"), 0o600); err != nil {
+		t.Fatalf("tamper object = %v", err)
+	}
+	corrupt := webForm(t, handler, http.MethodPost, "/resources/"+url.PathEscape(buckets[0].ID)+"/objects/verify?scope="+url.QueryEscape(groups[0].ID), url.Values{
+		"objectKey": {"hello.txt"},
+	})
+	if corrupt.Code != http.StatusSeeOther || !strings.Contains(corrupt.Header().Get("Location"), "status=corrupt") || !strings.Contains(corrupt.Header().Get("Location"), "observedSHA256=") {
+		t.Fatalf("corrupt verify = %d location %q, want bounded corruption evidence", corrupt.Code, corrupt.Header().Get("Location"))
+	}
+	corruptPage := webRequest(t, handler, http.MethodGet, corrupt.Header().Get("Location"), nil)
+	if corruptPage.Code != http.StatusOK || !strings.Contains(corruptPage.Body.String(), "Integrity check failed") || !strings.Contains(corruptPage.Body.String(), "Upload trusted bytes") {
+		t.Fatalf("corrupt notice = %d %q, want actionable bounded explanation", corruptPage.Code, corruptPage.Body.String())
+	}
+	digest := sha256.Sum256([]byte("hello from Ember"))
+	var recoveryBody bytes.Buffer
+	recoveryWriter := multipart.NewWriter(&recoveryBody)
+	_ = recoveryWriter.WriteField("objectKey", "hello.txt")
+	_ = recoveryWriter.WriteField("expectedSHA256", hex.EncodeToString(digest[:]))
+	recoveryPart, err := recoveryWriter.CreateFormFile("contentFile", "hello.txt")
+	if err != nil {
+		t.Fatalf("recovery file = %v", err)
+	}
+	_, _ = recoveryPart.Write([]byte("hello from Ember"))
+	_ = recoveryWriter.Close()
+	recoveryRequest := httptest.NewRequest(http.MethodPost, "/resources/"+url.PathEscape(buckets[0].ID)+"/objects/recover?scope="+url.QueryEscape(groups[0].ID), &recoveryBody)
+	recoveryRequest.Header.Set("Content-Type", recoveryWriter.FormDataContentType())
+	recoveryResponse := httptest.NewRecorder()
+	handler.ServeHTTP(recoveryResponse, recoveryRequest)
+	if recoveryResponse.Code != http.StatusSeeOther || !strings.Contains(recoveryResponse.Header().Get("Location"), "status=recovered") || !strings.Contains(recoveryResponse.Header().Get("Location"), "operation=") {
+		t.Fatalf("recover object = %d location %q, want operation-linked redirect", recoveryResponse.Code, recoveryResponse.Header().Get("Location"))
+	}
+	recoveredPage := webRequest(t, handler, http.MethodGet, recoveryResponse.Header().Get("Location"), nil)
+	if recoveredPage.Code != http.StatusOK || !strings.Contains(recoveredPage.Body.String(), "recovered") || !strings.Contains(recoveredPage.Body.String(), "Operation operation-") {
+		t.Fatalf("recovery notice = %d %q, want operation and audit evidence", recoveredPage.Code, recoveredPage.Body.String())
 	}
 	deleted := webForm(t, handler, http.MethodPost, "/resources/"+url.PathEscape(buckets[0].ID)+"/objects/delete?scope="+url.QueryEscape(groups[0].ID), url.Values{
 		"objectKey": {"hello.txt"}, "confirm": {"true"},
