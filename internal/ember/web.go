@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -182,21 +183,23 @@ func NewWebHandler(operator *Operator) http.Handler {
 	return &webHandler{
 		operator: operator,
 		templates: template.Must(template.New("page").Funcs(template.FuncMap{
-			"baseURL":                 webURL,
-			"resourceURL":             webResourceURL,
-			"resourceDeleteURL":       webResourceDeleteURL,
-			"resourceTagsURL":         webResourceTagsURL,
-			"resourceObjectsURL":      webResourceObjectsURL,
-			"resourceObjectURL":       webResourceObjectURL,
-			"resourceDeleteObjectURL": webResourceDeleteObjectURL,
-			"tenantURL":               webTenantURL,
-			"controlURL":              webControlURL,
-			"resourceLockURL":         webResourceLockURL,
-			"resourceTypeLabel":       webResourceTypeLabel,
-			"inventorySortURL":        webInventorySortURL,
-			"tagsValue":               webTagsValue,
-			"formatTime":              webFormatTime,
-			"formatBytes":             webFormatBytes,
+			"baseURL":                  webURL,
+			"resourceURL":              webResourceURL,
+			"resourceDeleteURL":        webResourceDeleteURL,
+			"resourceTagsURL":          webResourceTagsURL,
+			"resourceObjectsURL":       webResourceObjectsURL,
+			"resourceObjectURL":        webResourceObjectURL,
+			"resourceDeleteObjectURL":  webResourceDeleteObjectURL,
+			"resourceVerifyObjectURL":  webResourceVerifyObjectURL,
+			"resourceRecoverObjectURL": webResourceRecoverObjectURL,
+			"tenantURL":                webTenantURL,
+			"controlURL":               webControlURL,
+			"resourceLockURL":          webResourceLockURL,
+			"resourceTypeLabel":        webResourceTypeLabel,
+			"inventorySortURL":         webInventorySortURL,
+			"tagsValue":                webTagsValue,
+			"formatTime":               webFormatTime,
+			"formatBytes":              webFormatBytes,
 		}).ParseFS(webAssets, "web_assets.html")),
 	}
 }
@@ -554,6 +557,10 @@ func (handler *webHandler) tenant(writer http.ResponseWriter, request *http.Requ
 		handler.uploadBlob(writer, request, tenantID, segments[3])
 	case len(segments) == 6 && segments[2] == "resources" && segments[4] == "objects" && segments[5] == "delete" && request.Method == http.MethodPost:
 		handler.deleteBlob(writer, request, tenantID, segments[3])
+	case len(segments) == 6 && segments[2] == "resources" && segments[4] == "objects" && segments[5] == "verify" && request.Method == http.MethodPost:
+		handler.verifyBlob(writer, request, tenantID, segments[3])
+	case len(segments) == 6 && segments[2] == "resources" && segments[4] == "objects" && segments[5] == "recover" && request.Method == http.MethodPost:
+		handler.recoverBlob(writer, request, tenantID, segments[3])
 	case len(segments) == 5 && segments[2] == "resources" && segments[4] == "delete" && request.Method == http.MethodPost:
 		handler.deleteResource(writer, request, tenantID, segments[3])
 	case len(segments) == 5 && segments[2] == "resources" && segments[4] == "tags" && request.Method == http.MethodPost:
@@ -679,6 +686,14 @@ func (handler *webHandler) platformResource(writer http.ResponseWriter, request 
 	}
 	if len(segments) == 4 && segments[2] == "objects" && segments[3] == "delete" && request.Method == http.MethodPost {
 		handler.deleteBlob(writer, request, "", segments[1])
+		return
+	}
+	if len(segments) == 4 && segments[2] == "objects" && segments[3] == "verify" && request.Method == http.MethodPost {
+		handler.verifyBlob(writer, request, "", segments[1])
+		return
+	}
+	if len(segments) == 4 && segments[2] == "objects" && segments[3] == "recover" && request.Method == http.MethodPost {
+		handler.recoverBlob(writer, request, "", segments[1])
 		return
 	}
 	if len(segments) == 3 && segments[2] == "delete" && request.Method == http.MethodPost {
@@ -981,6 +996,80 @@ func (handler *webHandler) deleteBlob(writer http.ResponseWriter, request *http.
 	handler.redirect(writer, request, webResourceNoticeURL(webBasePath(request), tenantID, bucketID, principal.ScopeID, "deleted", request.FormValue("objectKey")))
 }
 
+func (handler *webHandler) verifyBlob(writer http.ResponseWriter, request *http.Request, tenantID, bucketID string) {
+	if err := request.ParseForm(); err != nil {
+		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
+		return
+	}
+	objectKey := strings.TrimSpace(request.FormValue("objectKey"))
+	principal := OperatorPrincipal{TenantID: tenantID, ScopeID: request.URL.Query().Get("scope")}
+	response, err := handler.operator.VerifyBlob(request.Context(), principal, bucketID, objectKey)
+	if err != nil && response == nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
+	status := "verified"
+	if err != nil {
+		status = "corrupt"
+	}
+	values := url.Values{"status": {status}, "noticeObject": {objectKey}}
+	if response != nil && response.Integrity != nil {
+		values.Set("expectedSHA256", response.Integrity.ExpectedSHA256)
+		values.Set("observedSHA256", response.Integrity.ObservedSHA256)
+	}
+	if principal.ScopeID != "" {
+		values.Set("scope", principal.ScopeID)
+	}
+	handler.redirect(writer, request, webResourcePath(webBasePath(request), tenantID, bucketID)+"?"+values.Encode())
+}
+
+func (handler *webHandler) recoverBlob(writer http.ResponseWriter, request *http.Request, tenantID, bucketID string) {
+	if err := request.ParseMultipartForm(1 << 20); err != nil {
+		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
+		return
+	}
+	objectKey := strings.TrimSpace(request.FormValue("objectKey"))
+	expectedSHA256 := strings.TrimSpace(request.FormValue("expectedSHA256"))
+	if len(expectedSHA256) != models.MaxBlobSHA256Length {
+		handler.renderError(writer, request, http.StatusBadRequest, errors.New("trusted checksum must be a 64-character SHA-256 value"))
+		return
+	}
+	if _, err := hex.DecodeString(expectedSHA256); err != nil {
+		handler.renderError(writer, request, http.StatusBadRequest, errors.New("trusted checksum must be hexadecimal"))
+		return
+	}
+	file, _, err := request.FormFile("contentFile")
+	if err != nil {
+		handler.renderError(writer, request, http.StatusBadRequest, errors.New("a recovery file is required"))
+		return
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, models.MaxBlobObjectSize+1))
+	if err != nil {
+		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
+		return
+	}
+	if int64(len(content)) > models.MaxBlobObjectSize {
+		handler.renderError(writer, request, http.StatusRequestEntityTooLarge, errors.New("recovery content exceeds the 10 MiB limit"))
+		return
+	}
+	principal := OperatorPrincipal{TenantID: tenantID, ScopeID: request.URL.Query().Get("scope")}
+	requestID := fmt.Sprintf("web-recovery-%d", time.Now().UnixNano())
+	response, err := handler.operator.RecoverBlob(request.Context(), principal, bucketID, objectKey, expectedSHA256, content, requestID, requestID)
+	if err != nil {
+		handler.renderError(writer, request, webStatus(err), err)
+		return
+	}
+	values := url.Values{"status": {"recovered"}, "noticeObject": {objectKey}}
+	if response != nil && response.Operation != nil {
+		values.Set("operation", response.Operation.ID)
+	}
+	if principal.ScopeID != "" {
+		values.Set("scope", principal.ScopeID)
+	}
+	handler.redirect(writer, request, webResourcePath(webBasePath(request), tenantID, bucketID)+"?"+values.Encode())
+}
+
 func webParseTags(value string) (map[string]string, error) {
 	tags := make(map[string]string)
 	if strings.TrimSpace(value) == "" {
@@ -1041,6 +1130,12 @@ func webNotice(request *http.Request) string {
 		return fmt.Sprintf("Object %q uploaded.", objectKey)
 	case "deleted":
 		return fmt.Sprintf("Object %q deleted.", objectKey)
+	case "verified":
+		return fmt.Sprintf("Integrity verified for object %q.", objectKey)
+	case "corrupt":
+		return fmt.Sprintf("Integrity check failed for object %q. Expected SHA-256 %s; observed %s. Upload trusted bytes to recover it.", objectKey, request.URL.Query().Get("expectedSHA256"), request.URL.Query().Get("observedSHA256"))
+	case "recovered":
+		return fmt.Sprintf("Object %q recovered. Operation %s is recorded in activity and audit.", objectKey, request.URL.Query().Get("operation"))
 	case "control":
 		return objectKey
 	default:
@@ -1323,6 +1418,14 @@ func webResourceObjectsURL(basePath, tenantID, resourceID, scope string) string 
 func webResourceDeleteObjectURL(basePath, tenantID, resourceID, scope string) string {
 	base := webResourcePath(basePath, tenantID, resourceID) + "/objects/delete"
 	return webWithScope(base, scope)
+}
+
+func webResourceVerifyObjectURL(basePath, tenantID, resourceID, scope string) string {
+	return webWithScope(webResourcePath(basePath, tenantID, resourceID)+"/objects/verify", scope)
+}
+
+func webResourceRecoverObjectURL(basePath, tenantID, resourceID, scope string) string {
+	return webWithScope(webResourcePath(basePath, tenantID, resourceID)+"/objects/recover", scope)
 }
 
 func webResourceLockURL(basePath, tenantID, resourceID, scope, action string) string {
