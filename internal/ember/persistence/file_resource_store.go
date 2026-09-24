@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/models"
 )
@@ -30,9 +31,10 @@ var (
 )
 
 type resourceStoreDiskState struct {
-	Version   int               `json:"version"`
-	NextID    uint64            `json:"next_id"`
-	Resources []models.Resource `json:"resources"`
+	Version   int                            `json:"version"`
+	NextID    uint64                         `json:"next_id"`
+	Resources []models.Resource              `json:"resources"`
+	Locks     map[string]models.ResourceLock `json:"locks,omitempty"`
 }
 
 // FileResourceStore persists bounded resource state in one private JSON snapshot.
@@ -115,8 +117,25 @@ func (store *FileResourceStore) load() error {
 	}
 
 	store.resources = resources
+	store.locks = state.Locks
+	if store.locks == nil {
+		store.locks = make(map[string]models.ResourceLock)
+	}
 	store.nextID = state.NextID
 	return nil
+}
+
+func (store *FileResourceStore) withFileLock(fn func() error) error {
+	lockFile, err := os.OpenFile(store.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return ErrResourceStoreIO
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return ErrResourceStoreIO
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	return fn()
 }
 
 func cloneStoredTags(tags map[string]string) map[string]string {
@@ -155,6 +174,7 @@ func (store *FileResourceStore) saveLocked() error {
 		Version:   fileResourceStoreVersion,
 		NextID:    store.nextID,
 		Resources: resources,
+		Locks:     store.locks,
 	}, "", "  ")
 	if err != nil {
 		return ErrResourceStoreIO
@@ -439,19 +459,27 @@ func (store *FileResourceStore) AcquireLock(ctx context.Context, scopeID, resour
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
-
-	resource, exists := store.resources[resourceID]
-	if !exists || resource.Spec.ParentID != scopeID {
-		return ErrResourceNotFound
-	}
-	if current, held := store.locks[resourceID]; held {
-		if current == lock {
-			return nil
+	return store.withFileLock(func() error {
+		if err := store.load(); err != nil {
+			return err
 		}
-		return ErrResourceLockConflict
-	}
-	store.locks[resourceID] = lock
-	return nil
+		resource, exists := store.resources[resourceID]
+		if !exists || resource.Spec.ParentID != scopeID {
+			return ErrResourceNotFound
+		}
+		if current, held := store.locks[resourceID]; held {
+			if current == lock {
+				return nil
+			}
+			return ErrResourceLockConflict
+		}
+		store.locks[resourceID] = lock
+		if err := store.saveLocked(); err != nil {
+			delete(store.locks, resourceID)
+			return err
+		}
+		return nil
+	})
 }
 
 func (store *FileResourceStore) ReleaseLock(ctx context.Context, scopeID, resourceID string, lock models.ResourceLock) error {
@@ -467,20 +495,28 @@ func (store *FileResourceStore) ReleaseLock(ctx context.Context, scopeID, resour
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
-
-	resource, exists := store.resources[resourceID]
-	if !exists || resource.Spec.ParentID != scopeID {
-		return ErrResourceNotFound
-	}
-	current, held := store.locks[resourceID]
-	if !held {
-		return ErrResourceLockNotHeld
-	}
-	if current != lock {
-		return ErrResourceLockNotOwner
-	}
-	delete(store.locks, resourceID)
-	return nil
+	return store.withFileLock(func() error {
+		if err := store.load(); err != nil {
+			return err
+		}
+		resource, exists := store.resources[resourceID]
+		if !exists || resource.Spec.ParentID != scopeID {
+			return ErrResourceNotFound
+		}
+		current, held := store.locks[resourceID]
+		if !held {
+			return ErrResourceLockNotHeld
+		}
+		if current != lock {
+			return ErrResourceLockNotOwner
+		}
+		delete(store.locks, resourceID)
+		if err := store.saveLocked(); err != nil {
+			store.locks[resourceID] = current
+			return err
+		}
+		return nil
+	})
 }
 
 func (store *FileResourceStore) InspectLock(ctx context.Context, scopeID, resourceID string) (*models.ResourceLock, error) {
@@ -491,18 +527,23 @@ func (store *FileResourceStore) InspectLock(ctx context.Context, scopeID, resour
 		return nil, err
 	}
 
-	store.mu.RLock()
-	defer store.mu.RUnlock()
-
-	resource, exists := store.resources[resourceID]
-	if !exists || resource.Spec.ParentID != scopeID {
-		return nil, ErrResourceNotFound
-	}
-	lock, held := store.locks[resourceID]
-	if !held {
-		return nil, nil
-	}
-	return &lock, nil
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var result *models.ResourceLock
+	err := store.withFileLock(func() error {
+		if err := store.load(); err != nil {
+			return err
+		}
+		resource, exists := store.resources[resourceID]
+		if !exists || resource.Spec.ParentID != scopeID {
+			return ErrResourceNotFound
+		}
+		if lock, held := store.locks[resourceID]; held {
+			result = &lock
+		}
+		return nil
+	})
+	return result, err
 }
 
 var _ ResourceStore = (*FileResourceStore)(nil)

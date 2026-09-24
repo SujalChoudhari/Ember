@@ -426,7 +426,7 @@ func TestOperatorExposesCompleteResourceLifecycleAndLockSurface(t *testing.T) {
 	}
 }
 
-func TestFileOperatorReopenPreservesResourcesAndProcessLocalLockContract(t *testing.T) {
+func TestFileOperatorReopenPreservesResourcesAndPersistedLockContract(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "state")
 	first, err := NewFileOperator(root, 64)
@@ -457,8 +457,8 @@ func TestFileOperatorReopenPreservesResourcesAndProcessLocalLockContract(t *test
 	if err != nil {
 		t.Fatalf("InspectResourceLock(reopen) error = %v", err)
 	}
-	if inspected != nil {
-		t.Fatalf("InspectResourceLock(reopen) = %#v, want process-local lock state", inspected)
+	if inspected == nil || *inspected != lock {
+		t.Fatalf("InspectResourceLock(reopen) = %#v, want %#v", inspected, lock)
 	}
 }
 

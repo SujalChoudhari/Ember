@@ -163,14 +163,39 @@ func TestFileResourceStoreLockStateIsProcessLocal(t *testing.T) {
 		t.Fatalf("NewFileResourceStore(reopen) error = %v", err)
 	}
 	inspected, err := reopened.InspectLock(ctx, "", resource.ID)
-	if err != nil {
-		t.Fatalf("InspectLock(reopen) error = %v", err)
+	if inspected == nil || *inspected != lock {
+		t.Fatalf("reopened lock = %#v, %v; want %#v", inspected, err, lock)
 	}
-	if inspected != nil {
-		t.Fatalf("reopened lock = %#v, want nil process-local state", inspected)
+	if err := reopened.AcquireLock(ctx, "", resource.ID, conflict); !errors.Is(err, ErrResourceLockConflict) {
+		t.Fatalf("cross-store conflicting AcquireLock() error = %v, want ErrResourceLockConflict", err)
 	}
 	if err := store.ReleaseLock(ctx, "", resource.ID, lock); err != nil {
 		t.Fatalf("ReleaseLock() error = %v", err)
+	}
+}
+
+func TestFileResourceStoreLockStatePersistsAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resources.json")
+	ctx := context.Background()
+	store, err := NewFileResourceStore(path)
+	if err != nil {
+		t.Fatalf("NewFileResourceStore() error = %v", err)
+	}
+	resource, err := store.Create(ctx, models.ResourceSpec{Type: models.ResourceTypeGroup, Name: "platform"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	lock := models.ResourceLock{Owner: "controller-a", Token: "token-a"}
+	if err := store.AcquireLock(ctx, "", resource.ID, lock); err != nil {
+		t.Fatalf("AcquireLock() error = %v", err)
+	}
+	reopened, err := NewFileResourceStore(path)
+	if err != nil {
+		t.Fatalf("NewFileResourceStore(reopen) error = %v", err)
+	}
+	inspected, err := reopened.InspectLock(ctx, "", resource.ID)
+	if err != nil || inspected == nil || *inspected != lock {
+		t.Fatalf("InspectLock(reopen) = %#v, %v; want %#v", inspected, err, lock)
 	}
 }
 

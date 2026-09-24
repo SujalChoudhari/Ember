@@ -142,6 +142,13 @@ func (store *SQLiteResourceStore) ensureSchema(ctx context.Context) error {
 		`INSERT OR IGNORE INTO ember_platform_resource_sequence (sequence_id, next_id) VALUES (1, 0)`); err != nil {
 		return sqliteResourceStoreError(err)
 	}
+	if _, err := transaction.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS ember_platform_resource_locks (
+		resource_id TEXT PRIMARY KEY,
+		owner TEXT NOT NULL,
+		token TEXT NOT NULL
+	)`); err != nil {
+		return sqliteResourceStoreError(err)
+	}
 	if err := transaction.Commit(); err != nil {
 		return sqliteResourceStoreError(err)
 	}
@@ -223,8 +230,13 @@ func (store *SQLiteResourceStore) hasReadOnlyLock(ctx context.Context, queryer s
 			return true, nil
 		}
 		visited[resourceID] = struct{}{}
-		if _, locked := store.locks[resourceID]; locked {
+		err := queryer.QueryRowContext(ctx,
+			`SELECT 1 FROM ember_platform_resource_locks WHERE resource_id = ?`, resourceID).Scan(new(int))
+		if err == nil {
 			return true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, sqliteResourceStoreError(err)
 		}
 		resource, err := store.getResourceByID(ctx, queryer, resourceID)
 		if errors.Is(err, ErrResourceNotFound) {
@@ -535,6 +547,10 @@ func (store *SQLiteResourceStore) Delete(ctx context.Context, scopeID, resourceI
 	if deleted != 1 {
 		return ErrResourceNotFound
 	}
+	if _, err := transaction.ExecContext(ctx,
+		`DELETE FROM ember_platform_resource_locks WHERE resource_id = ?`, resource.ID); err != nil {
+		return sqliteResourceStoreError(err)
+	}
 	if err := transaction.Commit(); err != nil {
 		return sqliteResourceStoreError(err)
 	}
@@ -557,13 +573,32 @@ func (store *SQLiteResourceStore) AcquireLock(ctx context.Context, scopeID, reso
 	if _, err := store.getResourceWithScope(ctx, store.db, scopeID, resourceID); err != nil {
 		return err
 	}
-	if current, held := store.locks[resourceID]; held {
+	transaction, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return sqliteResourceStoreError(err)
+	}
+	defer transaction.Rollback()
+	var current models.ResourceLock
+	err = transaction.QueryRowContext(ctx,
+		`SELECT owner, token FROM ember_platform_resource_locks WHERE resource_id = ?`, resourceID).
+		Scan(&current.Owner, &current.Token)
+	if err == nil {
 		if current == lock {
 			return nil
 		}
 		return ErrResourceLockConflict
 	}
-	store.locks[resourceID] = lock
+	if !errors.Is(err, sql.ErrNoRows) {
+		return sqliteResourceStoreError(err)
+	}
+	if _, err := transaction.ExecContext(ctx,
+		`INSERT INTO ember_platform_resource_locks (resource_id, owner, token) VALUES (?, ?, ?)`,
+		resourceID, lock.Owner, lock.Token); err != nil {
+		return ErrResourceLockConflict
+	}
+	if err := transaction.Commit(); err != nil {
+		return sqliteResourceStoreError(err)
+	}
 	return nil
 }
 
@@ -582,14 +617,31 @@ func (store *SQLiteResourceStore) ReleaseLock(ctx context.Context, scopeID, reso
 	if _, err := store.getResourceWithScope(ctx, store.db, scopeID, resourceID); err != nil {
 		return err
 	}
-	current, held := store.locks[resourceID]
-	if !held {
+	var current models.ResourceLock
+	transaction, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return sqliteResourceStoreError(err)
+	}
+	defer transaction.Rollback()
+	err = transaction.QueryRowContext(ctx,
+		`SELECT owner, token FROM ember_platform_resource_locks WHERE resource_id = ?`, resourceID).
+		Scan(&current.Owner, &current.Token)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrResourceLockNotHeld
+	}
+	if err != nil {
+		return sqliteResourceStoreError(err)
 	}
 	if current != lock {
 		return ErrResourceLockNotOwner
 	}
-	delete(store.locks, resourceID)
+	if _, err := transaction.ExecContext(ctx,
+		`DELETE FROM ember_platform_resource_locks WHERE resource_id = ?`, resourceID); err != nil {
+		return sqliteResourceStoreError(err)
+	}
+	if err := transaction.Commit(); err != nil {
+		return sqliteResourceStoreError(err)
+	}
 	return nil
 }
 
@@ -605,9 +657,15 @@ func (store *SQLiteResourceStore) InspectLock(ctx context.Context, scopeID, reso
 	if _, err := store.getResourceWithScope(ctx, store.db, scopeID, resourceID); err != nil {
 		return nil, err
 	}
-	lock, held := store.locks[resourceID]
-	if !held {
+	var lock models.ResourceLock
+	err := store.db.QueryRowContext(ctx,
+		`SELECT owner, token FROM ember_platform_resource_locks WHERE resource_id = ?`, resourceID).
+		Scan(&lock.Owner, &lock.Token)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, sqliteResourceStoreError(err)
 	}
 	return &lock, nil
 }
