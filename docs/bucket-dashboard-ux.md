@@ -159,7 +159,8 @@ The flow applies visibility of system status, match between the system and real-
 - Every destructive operation remains explicit and separately scoped.
 - Upload and delete outcomes are visible after redirect.
 - No invented metrics, charts, or provider capabilities appear.
-- The route renders correctly with `/ember` forwarded prefix and without it.
+- The route renders correctly with the configured forwarded prefix and at the
+  repository's loopback management path.
 - Desktop and narrow viewport screenshots are inspected; browser console has no errors.
 
 ## Sources
@@ -175,6 +176,8 @@ The flow applies visibility of system status, match between the system and real-
 - Kept the bucket dashboard focused on the object data plane, with cloud-console-inspired resource context, command actions, dense metrics, object table, compact configuration, activity, and separate destructive zone.
 - Added redirect-backed success notices for upload and object deletion without exposing object contents.
 - Removed redundant `Data plane`/`Traceability` auxiliary labels in favor of direct `Bucket contents`/`Activity` language.
-- Preserved the existing `/ember` prefix behavior, object upload/download/delete contracts, explicit destructive confirmation, and local-only boundary.
+- Preserved object upload/download/delete contracts, explicit destructive
+  confirmation, and the local-only boundary. The document does not describe a
+  public preview or a deleted dashboard route.
 - Verified `go test ./internal/ember/...`, `make build`, the live upload/list/download/delete flow, the clean post-delete row state, no `<select>` markup, browser console with zero errors, and the rendered desktop bucket and tenant creation surfaces.
 - Narrow viewport and keyboard traversal remain part of the acceptance boundary; native semantic controls and responsive CSS are present, but a dedicated narrow screenshot/keyboard session was not available in this browser runner.

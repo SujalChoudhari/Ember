@@ -1,8 +1,13 @@
 # Ember architecture
 
-Ember is a local-first, single-node operator. The executable in `cmd/ember`
-parses only the global process flags, opens a file-backed `Operator`, and
-passes the remaining command to the shared `internal/ember` CLI contract.
+Ember is a single-machine operator: it lets a person create, inspect, change,
+and recover local resources without a hosted control plane. The executable in
+`cmd/ember` parses process flags, opens a file-backed `Operator`, and passes the
+remaining command to the shared `internal/ember` CLI contract.
+
+This layering matters to operators and contributors. The CLI, HTTP adapter, and
+management page should describe the same behavior, while the operator boundary
+owns authorization, confirmation, identity, and audit decisions.
 
 ## Runtime layers
 

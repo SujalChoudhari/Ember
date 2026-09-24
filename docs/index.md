@@ -1,82 +1,73 @@
 # Ember documentation
 
-Ember's versioned, code-coupled documentation lives in this directory. The
-repository is the source of truth for commands, flags, response shapes, and
-behavior; documentation links back to the implementation and verified
-repository workflows rather than maintaining a second contract.
+This index helps a reader choose the next useful document. The repository is
+the source of truth for commands, flags, response shapes, limits, and behavior;
+the guides explain those contracts without replacing them.
 
-## Start here
+## Choose a path
 
-1. Follow the [clean-machine quickstart](../README.md#golden-clean-machine-lifecycle).
-2. Read the [build, package, and install notes](../README.md#build-package-and-install).
-3. Use the navigation below to distinguish behavior that exists today from
-   roadmap work that has not been implemented.
+### I want to understand Ember
 
-## Learner path
+1. Read the [README](../README.md) for the product boundary and one complete
+   local operation.
+2. Read [Architecture](architecture.md) for the layers and state flow.
+3. Read [Lifecycle and Blobs](lifecycle-and-blobs.md) for scopes, locks,
+   deletion, object integrity, and cleanup.
 
-- **Quickstart:** [Golden clean-machine lifecycle](../README.md#golden-clean-machine-lifecycle)
-- **Architecture:** [Architecture and conceptual model](architecture.md)
-- **Resource safety:** [Lifecycle, scopes, locks, and safe deletion](lifecycle-and-blobs.md)
-- **Blob behavior:** [Blob, quota, checksum, range, and cleanup guide](lifecycle-and-blobs.md)
+### I want to operate Ember
 
-## Contributor path
+- [CLI reference](cli-reference.md) lists commands, flags, output, and safe
+  examples.
+- [Deployment and recovery](deployment-and-recovery.md) explains plan, apply,
+  progress, rollback, and forward actions.
+- [Azure-shaped compatibility](azure-shaped-compatibility.md) distinguishes
+  local contracts from hosted-provider behavior.
 
-- **Build and test:** [Build, package, and install](../README.md#build-package-and-install)
-- **CLI contract:** [Versioned CLI reference](cli-reference.md)
-- **Azure-shaped compatibility:** [Compatibility matrix](azure-shaped-compatibility.md)
-- **Deployment and recovery:** [Deployment, recovery, and release guide](deployment-and-recovery.md)
-- **Upgrade and release evidence:** [Sprint 2 release evidence](sprint-2-release-evidence.md)
-- **Tenant/resource release gate:** [Tenant and resource release evidence](tenant-resource-release-evidence.md)
-- **Sprint 2 closeout:** [Three-day closeout receipt](sprint-2-closeout.md)
-- **Resource and Blob evidence:** [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
-- **Queue and event evidence:** [Sprint 2 queue and event evidence](sprint-2-queue-event-evidence.md)
-- **Documentation validation:** `scripts/ember-docs-check.sh`
-- **Project work:** [Open issues](https://github.com/SujalChoudhari/Ember/issues) and [recent changes](https://github.com/SujalChoudhari/Ember/commits/main)
+### I want to extend Ember
 
-## Documentation status
+- Read the implementation and tests in `internal/ember` together; adapters
+  should call the shared operator contract rather than create a second domain
+  path.
+- Use the [CLI reference](cli-reference.md) and compatibility matrix to find
+  stable interfaces.
+- Run `go test ./...`, `go test -race ./...`, `go vet ./...`, `make build`, and
+  `make smoke` for a runtime or packaging change.
 
-### Implemented behavior covered by the current repository
+### I want to verify a release
 
-- Local-first, single-node operation with bounded state under `--state-dir`.
-- Resource creation and inspection, including the resource → bucket hierarchy
-  used by the smoke path.
-- Platform tenant registration, per-tenant SQLite resource isolation, restart
-  persistence, and confirmation-gated local management UI behavior through the
-  [tenant/resource release evidence](tenant-resource-release-evidence.md) gate.
-- Blob write and read through the CLI smoke path.
-- Reproducible Go tests, platform-labelled packaging, checksum verification
-  during installation, and confirmation-gated reset.
-- Repeatable upgrade, rollback, package-provenance, race, static-analysis, and
-  clean-machine release evidence through the [Sprint 2 release evidence](sprint-2-release-evidence.md)
-  gate.
-- Resource scopes, read-only locks, safe deletion, Blob integrity, bounded
-  cleanup, and reset evidence through the [Sprint 2 resource and Blob evidence](sprint-2-resource-blob-evidence.md)
-  guide.
-- Queue retry, dead-letter, redrive, acknowledgement, event outcomes, and
-  bounded metrics through the [Sprint 2 queue and event evidence](sprint-2-queue-event-evidence.md)
-  guide.
-- Azure-shaped resource, CLI, HTTP, operation, workload, network, queue, and
-  safety semantics through the [compatibility matrix](azure-shaped-compatibility.md),
-  with explicit hosted-Azure non-goals.
-- Source-grounded architecture, CLI, lifecycle, deployment, recovery, and
-  release navigation through the guides linked above. The attached GitHub Wiki
-  remains pending the explicit visibility/Wiki authorization gate.
+- [Sprint 2 release evidence](sprint-2-release-evidence.md)
+- [Tenant and resource release evidence](tenant-resource-release-evidence.md)
+- [Resource and Blob evidence](sprint-2-resource-blob-evidence.md)
+- [Queue and event evidence](sprint-2-queue-event-evidence.md)
+- [Sprint 2 closeout](sprint-2-closeout.md)
+- `scripts/ember-docs-check.sh` for documentation references
 
-See the README quickstart and the source-linked issue-specific guides before
-assuming behavior beyond these verified paths.
+These receipts record exact checks and results. They are verification material,
+not a substitute for the operator guides.
 
-### Planned or separately documented
+## What is implemented
 
-The detailed guides are checked against the implementation by
-`scripts/ember-docs-check.sh` and the repository test/release gates. Planned
-product areas must not be presented as available behavior.
+The current repository includes local single-node state, tenant isolation,
+resource and Blob lifecycle operations, locks and safe deletion, workload and
+network contracts, deployment planning and recovery, queue retry and
+acknowledgement, event subscriptions and delivery outcomes, bounded metrics,
+and the local management page. The CLI, HTTP adapter, and page use the same
+operator boundary.
 
-### Deliberate non-goals and boundaries
+The repository does not implement a hosted Azure control plane, cloud
+provisioning, Kafka, Key Vault, public deployment, multi-node coordination, or
+distributed exactly-once delivery. Do not infer those capabilities from names
+that resemble a provider API. Planned work must remain labeled as planned.
 
-- Ember is not a hosted Azure service, a cloud account, or a multi-node control
-  plane.
-- The current repository does not authorize public visibility, Wiki enablement,
-  deployment, release, or publication changes. Wiki navigation remains gated by
-  [issue #149](https://github.com/SujalChoudhari/Ember/issues/149).
-- This documentation surface does not implement roadmap product features or
-  create a separate `Ember.wiki` repository.
+## Vocabulary
+
+- **Platform** is the local Ember process and its root resources.
+- **Tenant** is an isolated resource database.
+- **Scope** is the group boundary used for authorization and listing.
+- **Resource** is a managed group, bucket, workload, or network object.
+- **Operation** records a state-changing request; **audit** records its outcome.
+- **Queue/event** features are Ember's local delivery paths, not Kafka.
+- **Recovery** is an explicit rollback or forward action over recorded progress.
+
+For project status, use the [open issues](https://github.com/SujalChoudhari/Ember/issues)
+and [recent commits](https://github.com/SujalChoudhari/Ember/commits/main).

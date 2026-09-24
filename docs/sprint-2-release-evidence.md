@@ -35,8 +35,8 @@ publication artifact.
 The upgrade package tests provide the bounded state-transition evidence used by
 the gate:
 
-- `TestUpgradeMigratesGoldenV1StateToCurrentVersion` proves the supported v1 to
-  v2 migration and reopenable encoded state.
+- The upgrade migration test proves the supported v1 to v2 migration and
+  reopenable encoded state.
 - `TestPreflightRejectsUnsupportedVersionsDeterministically` proves that an
   unsupported version is rejected before mutation.
 - `TestUpgradeReportsBoundedRedactedFailureEvidence` and
