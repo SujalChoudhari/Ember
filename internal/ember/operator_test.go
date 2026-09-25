@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -64,6 +65,28 @@ func TestNewFileOperatorResetClearsAllPersistentRuntimeState(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("%s after reset: error = %v, want os.ErrNotExist", name, err)
 		}
+	}
+}
+
+func TestNewFileOperatorRejectsSecondOwnerOfStateDirectory(t *testing.T) {
+	if os.Getenv("EMBER_LOCK_HELPER") == "1" {
+		if _, err := NewFileOperator(os.Getenv("EMBER_LOCK_ROOT"), 64); err == nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	root := t.TempDir()
+	first, err := NewFileOperator(root, 64)
+	if err != nil {
+		t.Fatalf("NewFileOperator(first) error = %v", err)
+	}
+	if first == nil {
+		t.Fatal("NewFileOperator(first) returned nil operator")
+	}
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestNewFileOperatorRejectsSecondOwnerOfStateDirectory$")
+	cmd.Env = append(os.Environ(), "EMBER_LOCK_HELPER=1", "EMBER_LOCK_ROOT="+root)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("second process lock probe error = %v", err)
 	}
 }
 

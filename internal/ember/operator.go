@@ -6,8 +6,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/deployment"
 	"github.com/SujalChoudhari/Ember/internal/ember/events"
@@ -28,6 +30,7 @@ var (
 	ErrOperatorNetworkUnavailable      = errors.New("operator network inspection unavailable")
 	ErrDestructiveConfirmationRequired = errors.New("explicit confirmation is required for destructive actions")
 	ErrInvalidOperatorListLimit        = errors.New("invalid operator list limit")
+	ErrStateDirectoryInUse             = errors.New("state directory is already owned by another Ember process")
 )
 
 const MaxOperatorListLimit = 100
@@ -57,6 +60,7 @@ func (principal OperatorPrincipal) validate() error {
 }
 
 type Operator struct {
+	stateLock         *os.File
 	resources         ResourceControlPlane
 	blobs             persistence.BlobStore
 	operations        ResourceOperationControlPlane
@@ -151,6 +155,50 @@ func newOperatorWithRuntimeAndNetwork(resources ResourceControlPlane, blobs pers
 }
 
 func NewFileOperator(root string, quota int64) (*Operator, error) {
+	if strings.TrimSpace(root) == "" {
+		return nil, ErrInvalidOperator
+	}
+	root = filepath.Clean(root)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, ErrInvalidOperator
+	}
+	lockPath := filepath.Join(root, ".ember-state.lock")
+	stateLock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, ErrInvalidOperator
+	}
+	if err := syscall.Flock(int(stateLock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			contents, readErr := os.ReadFile(lockPath)
+			_ = stateLock.Close()
+			if readErr == nil && strings.TrimSpace(string(contents)) == strconv.Itoa(os.Getpid()) {
+				return newFileOperator(root, quota)
+			}
+			return nil, ErrStateDirectoryInUse
+		}
+		_ = stateLock.Close()
+		return nil, ErrInvalidOperator
+	}
+	if err := stateLock.Truncate(0); err != nil {
+		_ = stateLock.Close()
+		return nil, ErrInvalidOperator
+	}
+	if _, err := stateLock.WriteString(strconv.Itoa(os.Getpid())); err != nil {
+		_ = stateLock.Close()
+		return nil, ErrInvalidOperator
+	}
+
+	operator, err := newFileOperator(root, quota)
+	if err != nil {
+		_ = syscall.Flock(int(stateLock.Fd()), syscall.LOCK_UN)
+		_ = stateLock.Close()
+		return nil, err
+	}
+	operator.stateLock = stateLock
+	return operator, nil
+}
+
+func newFileOperator(root string, quota int64) (*Operator, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, ErrInvalidOperator
 	}

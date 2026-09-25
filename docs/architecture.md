@@ -29,7 +29,10 @@ owns authorization, confirmation, identity, and audit decisions.
 ## State and request flow
 
 The default state directory is `.ember-state`; `--state-dir` or
-`EMBER_STATE_DIR` selects another directory. `--quota` bounds Blob bytes and
+`EMBER_STATE_DIR` selects another directory. Ember takes an advisory exclusive
+lock on the state directory for the lifetime of the process, so one state
+directory must not be opened by multiple Ember processes concurrently. A
+second owner fails closed before opening any stores. `--quota` bounds Blob bytes and
 defaults to 64 MiB. A request enters through CLI or HTTP, receives an operator
 principal and optional scope, is validated against model and list bounds, and
 then reads or mutates the SQLite or file-backed stores owned by that state
