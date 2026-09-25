@@ -45,6 +45,28 @@ func newTestOperator(t *testing.T) *Operator {
 	return operator
 }
 
+func TestNewFileOperatorResetClearsAllPersistentRuntimeState(t *testing.T) {
+	root := t.TempDir()
+	operator, err := NewFileOperator(root, 1<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+
+	for _, name := range []string{"work-queue.json", "event-dead-letters.json", "event-topology.json"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(`{"stale":true}`), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	if err := operator.reset(context.Background()); err != nil {
+		t.Fatalf("reset() error = %v", err)
+	}
+	for _, name := range []string{"work-queue.json", "event-dead-letters.json", "event-topology.json"} {
+		if _, err := os.Stat(filepath.Join(root, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s after reset: error = %v, want os.ErrNotExist", name, err)
+		}
+	}
+}
+
 func TestOperatorScopesResourceLifecycleAndProviderState(t *testing.T) {
 	operator := newTestOperator(t)
 	ctx := context.Background()

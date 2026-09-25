@@ -294,11 +294,43 @@ func NewFileOperator(root string, quota int64) (*Operator, error) {
 		if err := previousReset(ctx); err != nil {
 			return err
 		}
+		if err := resetRuntimeState(ctx, operator, root); err != nil {
+			return err
+		}
 		return tenantStore.Reset(ctx)
 	}
 	operator.tenants = tenantStore
 	operator.deployment = deploymentControl
 	return operator, nil
+}
+
+func resetRuntimeState(ctx context.Context, operator *Operator, root string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, name := range []string{"work-queue.json", "event-dead-letters.json", "event-topology.json"} {
+		if err := os.Remove(filepath.Join(root, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return ErrOperatorResetUnavailable
+		}
+	}
+	broker, err := events.NewTopicBroker(events.TopicBrokerOptions{MaxTopics: events.MaxTopicCount, MaxSubscriptions: events.MaxSubscriptionCount})
+	if err != nil {
+		return ErrOperatorResetUnavailable
+	}
+	deadLetters, err := queue.NewFileDeadLetterStore(filepath.Join(root, "event-dead-letters.json"), queue.DeadLetterStoreOptions{})
+	if err != nil {
+		return ErrOperatorResetUnavailable
+	}
+	workQueue, err := queue.NewFileQueue(filepath.Join(root, "work-queue.json"), queue.QueueOptions{})
+	if err != nil {
+		return ErrOperatorResetUnavailable
+	}
+	operator.eventBroker = broker
+	operator.eventDeadLetters = deadLetters
+	operator.eventMetrics = events.NewMetrics()
+	operator.workQueue = workQueue
+	operator.eventTopologyPath = filepath.Join(root, "event-topology.json")
+	return nil
 }
 
 func (operator *Operator) tenantResourceManager(ctx context.Context, tenantID string) (*ResourceManager, error) {
