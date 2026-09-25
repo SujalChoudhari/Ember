@@ -600,7 +600,7 @@ func (handler *webHandler) controlDeploymentApply(writer http.ResponseWriter, re
 
 func webParameters(value string) map[string]string {
 	parameters := make(map[string]string)
-	for _, line := range strings.Split(value, "\\n") {
+	for _, line := range strings.Split(value, "\n") {
 		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
 		if len(parts) == 2 && strings.TrimSpace(parts[0]) != "" {
 			parameters[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
