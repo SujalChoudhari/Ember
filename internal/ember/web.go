@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/SujalChoudhari/Ember/internal/ember/events"
@@ -32,10 +33,13 @@ var (
 )
 
 const webTenantActivityLimit = 10
+const webMaxRequestBodyBytes int64 = 12 << 20
 
 type webHandler struct {
-	operator  *Operator
-	templates *template.Template
+	operator        *Operator
+	templates       *template.Template
+	receiptMu       sync.Mutex
+	pendingReceipts map[string]string
 }
 
 type webPage struct {
@@ -73,6 +77,7 @@ type webPage struct {
 	Subscriptions    []events.Subscription
 	DeadLetters      []queue.DeadLetterRecord
 	QueueStatus      string
+	QueueReceipt     string
 	Metrics          events.MetricsSnapshot
 	EventRuntime     string
 	PlatformOverview webPlatformOverview
@@ -184,7 +189,8 @@ type webWorkload struct {
 
 func NewWebHandler(operator *Operator) http.Handler {
 	return &webHandler{
-		operator: operator,
+		operator:        operator,
+		pendingReceipts: make(map[string]string),
 		templates: template.Must(template.New("page").Funcs(template.FuncMap{
 			"baseURL":                  webURL,
 			"resourceURL":              webResourceURL,
@@ -259,6 +265,17 @@ func (handler *webHandler) ServeHTTP(writer http.ResponseWriter, request *http.R
 		handler.renderError(writer, request, http.StatusInternalServerError, ErrInvalidOperator)
 		return
 	}
+	if request.Method == http.MethodPost {
+		if request.ContentLength > webMaxRequestBodyBytes {
+			writer.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+		if !webSameOrigin(request) {
+			writer.WriteHeader(http.StatusForbidden)
+			return
+		}
+		request.Body = http.MaxBytesReader(writer, request.Body, webMaxRequestBodyBytes)
+	}
 	if request.URL.Path == "/static/style.css" {
 		if request.Method != http.MethodGet {
 			writer.Header().Set("Allow", http.MethodGet)
@@ -296,6 +313,24 @@ func (handler *webHandler) ServeHTTP(writer http.ResponseWriter, request *http.R
 	default:
 		handler.renderError(writer, request, http.StatusNotFound, errors.New("page not found"))
 	}
+}
+
+func webSameOrigin(request *http.Request) bool {
+	origin := request.Header.Get("Origin")
+	if origin == "" {
+		origin = request.Header.Get("Referer")
+		if origin == "" {
+			return false
+		}
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host != request.Host {
+		return false
+	}
+	if request.TLS == nil {
+		return parsed.Scheme == "http"
+	}
+	return parsed.Scheme == "https"
 }
 
 func webPathSegments(pathValue string) ([]string, bool) {

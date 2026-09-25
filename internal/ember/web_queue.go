@@ -7,6 +7,9 @@ import (
 )
 
 func controlQueueRedirect(request *http.Request, notice string) string {
+	if receiptIndex := strings.Index(notice, "; receipt "); receiptIndex >= 0 {
+		notice = notice[:receiptIndex] + "."
+	}
 	location, _ := url.Parse(webControlURL(webBasePath(request), request.FormValue("tenant"), request.FormValue("scope"), "queue"))
 	query := location.Query()
 	query.Set("status", "control")
@@ -40,8 +43,22 @@ func (handler *webHandler) controlQueueReceive(writer http.ResponseWriter, reque
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
-	notice := "Queue received " + message.ID + "; receipt " + message.Receipt + ". Payload is not shown in the URL."
-	handler.redirect(writer, request, controlQueueRedirect(request, notice))
+	handler.receiptMu.Lock()
+	if len(handler.pendingReceipts) >= 128 {
+		for reference := range handler.pendingReceipts {
+			delete(handler.pendingReceipts, reference)
+			break
+		}
+	}
+	handler.pendingReceipts[message.ID] = message.Receipt
+	handler.receiptMu.Unlock()
+	notice := "Queue received " + message.ID + ". Use the protected acknowledgement control below."
+	location := controlQueueRedirect(request, notice)
+	parsed, _ := url.Parse(location)
+	query := parsed.Query()
+	query.Set("receiptRef", message.ID)
+	parsed.RawQuery = query.Encode()
+	handler.redirect(writer, request, parsed.String())
 }
 
 func (handler *webHandler) controlQueueAck(writer http.ResponseWriter, request *http.Request) {
@@ -49,9 +66,17 @@ func (handler *webHandler) controlQueueAck(writer http.ResponseWriter, request *
 		handler.renderError(writer, request, http.StatusBadRequest, errInvalidWebForm)
 		return
 	}
-	if err := handler.operator.AcknowledgeOperatorMessage(request.Context(), OperatorPrincipal{TenantID: request.FormValue("tenant"), ScopeID: request.FormValue("scope")}, strings.TrimSpace(request.FormValue("receipt"))); err != nil {
+	receipt := strings.TrimSpace(request.FormValue("receipt"))
+	if err := handler.operator.AcknowledgeOperatorMessage(request.Context(), OperatorPrincipal{TenantID: request.FormValue("tenant"), ScopeID: request.FormValue("scope")}, receipt); err != nil {
 		handler.renderError(writer, request, webStatus(err), err)
 		return
 	}
+	handler.receiptMu.Lock()
+	for reference, pending := range handler.pendingReceipts {
+		if pending == receipt {
+			delete(handler.pendingReceipts, reference)
+		}
+	}
+	handler.receiptMu.Unlock()
 	handler.redirect(writer, request, controlQueueRedirect(request, "Queue message acknowledged."))
 }

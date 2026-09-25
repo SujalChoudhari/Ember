@@ -260,6 +260,7 @@ func TestWebBucketStoreUploadsListsAndDownloadsObjects(t *testing.T) {
 	}
 	uploadRequest := httptest.NewRequest(http.MethodPost, "/resources/"+url.PathEscape(buckets[0].ID)+"/objects?scope="+url.QueryEscape(groups[0].ID), &body)
 	uploadRequest.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	uploadRequest.Header.Set("Origin", "http://"+uploadRequest.Host)
 	uploadResponse := httptest.NewRecorder()
 	handler.ServeHTTP(uploadResponse, uploadRequest)
 	if uploadResponse.Code != http.StatusSeeOther {
@@ -313,6 +314,7 @@ func TestWebBucketStoreUploadsListsAndDownloadsObjects(t *testing.T) {
 	_ = recoveryWriter.Close()
 	recoveryRequest := httptest.NewRequest(http.MethodPost, "/resources/"+url.PathEscape(buckets[0].ID)+"/objects/recover?scope="+url.QueryEscape(groups[0].ID), &recoveryBody)
 	recoveryRequest.Header.Set("Content-Type", recoveryWriter.FormDataContentType())
+	recoveryRequest.Header.Set("Origin", "http://"+recoveryRequest.Host)
 	recoveryResponse := httptest.NewRecorder()
 	handler.ServeHTTP(recoveryResponse, recoveryRequest)
 	if recoveryResponse.Code != http.StatusSeeOther || !strings.Contains(recoveryResponse.Header().Get("Location"), "status=recovered") || !strings.Contains(recoveryResponse.Header().Get("Location"), "operation=") {
@@ -1157,6 +1159,58 @@ func TestWebControlDestructiveActionsUseReviewPages(t *testing.T) {
 	}
 }
 
+func TestWebStateChangingRequestsRequireSameOrigin(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	request := httptest.NewRequest(http.MethodPost, "/tenants", strings.NewReader("id=alpha&displayName=Alpha"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("missing-origin POST status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/tenants", strings.NewReader("id=alpha&displayName=Alpha"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "http://"+request.Host)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("same-origin POST status = %d, want redirect", response.Code)
+	}
+}
+
+func TestWebMultipartRequestsEnforceTotalBodyLimit(t *testing.T) {
+	operator, err := NewFileOperator(t.TempDir(), 64<<20)
+	if err != nil {
+		t.Fatalf("NewFileOperator() error = %v", err)
+	}
+	defer operator.Close()
+	handler := NewWebHandler(operator)
+
+	body := bytes.NewReader(bytes.Repeat([]byte("x"), 12<<20+1))
+	request := httptest.NewRequest(http.MethodPost, "/resources/bucket/objects?scope=group", body)
+	request.Header.Set("Content-Type", "multipart/form-data; boundary=invalid")
+	request.Header.Set("Origin", "http://"+request.Host)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized multipart status = %d, want %d", response.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestControlQueueRedirectDoesNotExposeReceipt(t *testing.T) {
+	location := controlQueueRedirect(httptest.NewRequest(http.MethodPost, "/control", nil), "Queue received msg-1; receipt secret-receipt.")
+	if strings.Contains(location, "secret-receipt") {
+		t.Fatalf("queue redirect = %q, want receipt excluded from URL", location)
+	}
+}
+
 func webRequest(t *testing.T, handler http.Handler, method, path string, body *strings.Reader) *httptest.ResponseRecorder {
 	t.Helper()
 	if body == nil {
@@ -1179,6 +1233,7 @@ func webForm(t *testing.T, handler http.Handler, method, path string, values url
 	}
 	request := httptest.NewRequest(method, path, body)
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.Header.Set("Origin", "http://"+request.Host)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
 	return recorder
