@@ -1,6 +1,6 @@
 # Ember architecture
 
-Ember is a single-machine operator: it lets a person create, inspect, change,
+Ember is a local-first, single-node cloud computing platform: it lets a person create, inspect, change,
 and recover local resources without a hosted control plane. The executable in
 `cmd/ember` parses process flags, opens a file-backed `Operator`, and passes the
 remaining command to the shared `internal/ember` CLI contract.
@@ -63,9 +63,9 @@ recorded object; corruption is not silently overwritten.
 
 ## Boundaries
 
-Ember does not implement a hosted Azure control plane, ARM wire compatibility,
-cloud authentication, multi-node coordination, distributed locks, or
-exactly-once delivery. The management server is standard-library HTTP and
+Ember does not implement a hosted multi-node control plane, provider-specific
+wire compatibility, external account authentication, multi-node coordination,
+distributed locks, or exactly-once delivery. The management server is standard-library HTTP and
 loopback-only. Packaging and smoke scripts verify local artifacts only; they do
 not deploy, publish, change repository visibility, or enable the GitHub Wiki.
 

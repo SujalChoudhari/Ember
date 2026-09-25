@@ -20,8 +20,8 @@ the guides explain those contracts without replacing them.
   examples.
 - [Deployment and recovery](deployment-and-recovery.md) explains plan, apply,
   progress, rollback, and forward actions.
-- [Azure-shaped compatibility](azure-shaped-compatibility.md) distinguishes
-  local contracts from hosted-provider behavior.
+- [Cloud-provider compatibility boundaries](azure-shaped-compatibility.md)
+  distinguishes local contracts from hosted-provider behavior.
 
 ### I want to extend Ember
 
@@ -54,10 +54,10 @@ acknowledgement, event subscriptions and delivery outcomes, bounded metrics,
 and the local management page. The CLI, HTTP adapter, and page use the same
 operator boundary.
 
-The repository does not implement a hosted Azure control plane, cloud
-provisioning, Kafka, Key Vault, public deployment, multi-node coordination, or
-distributed exactly-once delivery. Do not infer those capabilities from names
-that resemble a provider API. Planned work must remain labeled as planned.
+The repository does not implement external cloud provisioning, Kafka, Key Vault,
+public deployment, multi-node coordination, or distributed exactly-once
+delivery. Do not infer those capabilities from provider-like names. Planned work
+must remain labeled as planned.
 
 ## Vocabulary
 
