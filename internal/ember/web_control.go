@@ -255,11 +255,15 @@ func (handler *webHandler) controlPage(writer http.ResponseWriter, request *http
 			return
 		}
 	}
+	handler.receiptMu.Lock()
+	queueReceipt := handler.pendingReceipts[request.URL.Query().Get("receiptRef")]
+	handler.receiptMu.Unlock()
 	handler.render(writer, request, http.StatusOK, webPage{
 		View: "control", Section: request.URL.Query().Get("section"), Title: "Control center",
 		Tenant: tenant, Tenants: tenants, TenantID: tenantID, SelectedScope: selectedScope,
-		Query:     request.URL.Query(),
-		Resources: resources, Workloads: workloads, Networks: networks, Ports: ports, Endpoints: endpoints,
+		QueueReceipt: queueReceipt,
+		Query:        request.URL.Query(),
+		Resources:    resources, Workloads: workloads, Networks: networks, Ports: ports, Endpoints: endpoints,
 		Operations: operations, Audit: audit, ApplyProgress: progress, Recoveries: recoveries,
 		Topics: topics, Subscriptions: subscriptions, DeadLetters: deadLetters,
 		Metrics: metrics, QueueStatus: handler.operator.QueueRuntimeStatus(), EventRuntime: handler.operator.EventRuntimeStatus(), Notice: webNotice(request),
