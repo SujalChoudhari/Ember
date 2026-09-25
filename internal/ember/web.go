@@ -209,6 +209,7 @@ func NewWebHandler(operator *Operator) http.Handler {
 			"tagsValue":                webTagsValue,
 			"formatTime":               webFormatTime,
 			"formatBytes":              webFormatBytes,
+			"queryValue":               func(values url.Values, key string) string { return values.Get(key) },
 		}).ParseFS(webAssets, "web_assets.html")),
 	}
 }

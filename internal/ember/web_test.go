@@ -1211,6 +1211,55 @@ func TestControlQueueRedirectDoesNotExposeReceipt(t *testing.T) {
 	}
 }
 
+func TestWebParametersAcceptLFAndCRLFInput(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+	}{
+		{name: "lf", input: "region=west\nreplicas=2"},
+		{name: "crlf", input: "region=west\r\nreplicas=2"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := webParameters(test.input)
+			if got["region"] != "west" || got["replicas"] != "2" || len(got) != 2 {
+				t.Fatalf("webParameters(%q) = %#v, want two parsed entries", test.input, got)
+			}
+		})
+	}
+}
+
+func TestWebPortalContractsKeepResponsiveRulesAndFormNamesScoped(t *testing.T) {
+	css, err := webAssets.ReadFile("web_assets.css")
+	if err != nil {
+		t.Fatalf("read stylesheet: %v", err)
+	}
+	stylesheet := string(css)
+	desktopRules := strings.SplitN(stylesheet, "@media", 2)[0]
+	for _, leakedRule := range []string{
+		"\n  nav { justify-content: flex-start; }",
+		"\n  .two-column, .detail-grid { grid-template-columns: 1fr; }",
+	} {
+		if strings.Contains(desktopRules, leakedRule) {
+			t.Fatalf("stylesheet contains unscoped responsive rule %q", leakedRule)
+		}
+	}
+
+	templateBytes, err := webAssets.ReadFile("web_assets.html")
+	if err != nil {
+		t.Fatalf("read portal template: %v", err)
+	}
+	templateText := string(templateBytes)
+	if strings.Contains(templateText, `name="volumeName"`) || strings.Contains(templateText, `name="path" placeholder="/data"`) {
+		t.Fatal("volume form contains fields that do not match the handler contract")
+	}
+	if !strings.Contains(templateText, `name="name" placeholder="volume name"`) {
+		t.Fatal("volume form is missing the handler's name field")
+	}
+	if !strings.Contains(templateText, `{{if eq (queryValue .Query "status") "succeeded"}} selected{{end}}`) {
+		t.Fatal("status filter does not preserve the selected value")
+	}
+}
+
 func webRequest(t *testing.T, handler http.Handler, method, path string, body *strings.Reader) *httptest.ResponseRecorder {
 	t.Helper()
 	if body == nil {

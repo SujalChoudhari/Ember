@@ -268,6 +268,18 @@ th { color: var(--muted); font-size: .76rem; letter-spacing: .04em; text-transfo
   .health-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .inventory-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .inventory-filters .filter-actions { grid-column: 1 / -1; }
+  nav { justify-content: flex-start; }
+  .two-column, .detail-grid { grid-template-columns: 1fr; }
+  .choice-grid.three-up, .provider-grid { grid-template-columns: 1fr; }
+  .provider-heading { grid-column: auto; }
+  .resource-heading-row { flex-direction: column; }
+  .resource-actions { justify-content: flex-start; }
+  .command-bar { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .command-item { border-bottom: 0; border-right: 1px solid var(--line); min-width: 0; padding: .4rem; }
+  .command-item:last-child { border-right: 0; }
+  .upload-fields { grid-template-columns: 1fr; }
+  .danger-panel { align-items: flex-start; flex-direction: column; }
+  .danger-panel form { align-items: flex-start; justify-content: flex-start; }
 }
 
 /* Control center */
@@ -292,20 +304,6 @@ th { color: var(--muted); font-size: .76rem; letter-spacing: .04em; text-transfo
 .unavailable-grid > div { background: var(--surface-muted); border-left: 3px solid var(--line-strong); padding: .75rem; }
 .unavailable-grid p { color: var(--muted); font-size: .82rem; margin-bottom: 0; }
 
-
-  nav { justify-content: flex-start; }
-  .two-column, .detail-grid { grid-template-columns: 1fr; }
-  .choice-grid.three-up, .provider-grid { grid-template-columns: 1fr; }
-  .provider-heading { grid-column: auto; }
-  .resource-heading-row { flex-direction: column; }
-  .resource-actions { justify-content: flex-start; }
-  .command-bar { display: grid; grid-template-columns: repeat(3, 1fr); }
-  .command-item { border-bottom: 0; border-right: 1px solid var(--line); min-width: 0; padding: .4rem; }
-  .command-item:last-child { border-right: 0; }
-  .upload-fields { grid-template-columns: 1fr; }
-  .danger-panel { align-items: flex-start; flex-direction: column; }
-  .danger-panel form { align-items: flex-start; justify-content: flex-start; }
-}
 @media (max-width: 26rem) {
   .brand-context { display: none; }
   .context-label { font-size: .58rem; }
