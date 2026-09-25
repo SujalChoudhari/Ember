@@ -1,18 +1,18 @@
 # Ember
 
-Ember is a small, local control plane for learning and operating resource
-lifecycles on one machine. It stores its state in a directory you choose,
+Ember is a local-first, single-node cloud computing platform for learning and
+operating resource lifecycles on one machine. It stores its state in a directory you choose,
 exposes the same contracts through the CLI and local HTTP management page, and
 keeps destructive actions, scope boundaries, retries, and recovery explicit.
-It is not a hosted cloud service and does not require a cloud account.
+It does not require an external service or account.
 
 ## Who this is for
 
 Use Ember when you want to understand what an operator does, reproduce a
 lifecycle on a disposable machine, or build against a clear local contract.
 The repository documents what is implemented and calls out work that is only a
-proposal; it does not imply AWS, Azure, GCP, Kafka, or secret-management
-features that are not present.
+proposal; names and interfaces do not imply hosted-provider, Kafka, or
+secret-management features that are not present.
 
 ## Requirements
 
